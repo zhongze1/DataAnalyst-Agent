@@ -10,6 +10,13 @@ __pycache__/
 # 上传的数据文件与会话元信息
 data/
 
+# 测试与覆盖率产物
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+
 # IDE
 .idea/
 .vscode/

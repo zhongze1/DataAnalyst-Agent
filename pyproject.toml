@@ -13,3 +13,38 @@ dependencies = [
     "pydantic-settings>=2.4.0",
     "httpx>=0.27.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 项目未打包安装，需把仓库根目录加入 sys.path 才能 import app
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q --cov=app --cov-report=term-missing"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = false
+
+[tool.coverage.report]
+# 验收线：整体覆盖率不低于 70%
+fail_under = 70
+show_missing = true
+skip_covered = false
+# 前端静态资源与纯展示层不计入
+omit = [
+    "app/web/*",
+    "app/routers/__init__.py",
+    "app/storage/__init__.py",
+    "app/agent/__init__.py",
+    "app/llm/__init__.py",
+    "app/tools/__init__.py",
+]
