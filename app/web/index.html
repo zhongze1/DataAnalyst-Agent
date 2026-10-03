@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DataAnalyst Agent</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">DA</span>
+      <div>
+        <h1>DataAnalyst Agent</h1>
+        <p>上传 Excel · Agent 自主调用 pandas 分析 · 单 Agent Loop</p>
+      </div>
+    </div>
+    <div class="health" id="health">连接中…</div>
+  </header>
+
+  <main class="layout">
+    <!-- 左栏：数据源 -->
+    <aside class="panel sidebar">
+      <section class="block">
+        <h2>1. 上传数据</h2>
+        <div class="dropzone" id="dropzone">
+          <input type="file" id="fileInput" accept=".xlsx,.xlsm,.xltx,.xltm" hidden />
+          <p class="dz-main">拖拽 Excel 到这里</p>
+          <p class="dz-sub">或 <button class="link" id="pickBtn">点击选择文件</button></p>
+          <p class="dz-hint">支持 .xlsx / .xlsm，单文件 ≤ 50MB</p>
+        </div>
+        <div class="progress hidden" id="progress"><div class="bar"></div><span>上传中…</span></div>
+      </section>
+
+      <section class="block">
+        <h2>2. 当前数据集</h2>
+        <div id="fileInfo" class="file-info empty">尚未上传文件</div>
+        <div id="sheetList" class="chips"></div>
+      </section>
+
+      <section class="block">
+        <h2>示例问题</h2>
+        <ul class="samples" id="samples">
+          <li>整体数据结构是怎样的？有哪些异常值和缺失？</li>
+          <li>各列之间的相关性如何？哪些因素影响最大？</li>
+          <li>帮我做一个分组的聚合统计并解读结果</li>
+        </ul>
+      </section>
+    </aside>
+
+    <!-- 右栏：对话 -->
+    <section class="panel chat">
+      <div class="chat-head">
+        <h2>3. 与 Agent 对话</h2>
+        <button class="ghost" id="resetBtn" disabled>清空对话</button>
+      </div>
+      <div class="messages" id="messages">
+        <div class="msg assistant">
+          <div class="avatar">AI</div>
+          <div class="bubble">
+            <p>你好！我是数据分析 Agent。</p>
+            <p>请先在左侧上传 Excel 文件，然后描述你想分析的问题。我会自己读取表结构、
+            调用 pandas 计算，然后把关键指标和结论给你，并附上每一步工具调用过程。</p>
+          </div>
+        </div>
+      </div>
+      <form class="composer" id="composer">
+        <textarea id="input" rows="1" placeholder="例如：销售额按月份的趋势如何？哪些月份异常？"></textarea>
+        <button type="submit" id="sendBtn" disabled>发送</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

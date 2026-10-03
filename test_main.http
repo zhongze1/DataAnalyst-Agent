@@ -1,0 +1,40 @@
+# ---- DataAnalyst Agent 请求示例（VS Code REST Client / IntelliJ HTTP Client）----
+### 健康检查
+GET http://127.0.0.1:8000/api/health
+Accept: application/json
+
+### 上传 Excel（换成你的文件）
+POST http://127.0.0.1:8000/api/files/upload
+Accept: application/json
+Content-Disposition: attach; filename="sales.xlsx"
+
+< ./sample_data/sales.xlsx
+
+### 提问（session_id 替换为上一步返回值）
+POST http://127.0.0.1:8000/api/chat
+Content-Type: application/json
+
+{
+  "session_id": "替换为上传返回的 session_id",
+  "message": "帮我分析这份数据的整体情况：结构、缺失值、异常值，以及各列之间的相关性"
+}
+
+### 追问（同一 session 内保留上下文）
+POST http://127.0.0.1:8000/api/chat
+Content-Type: application/json
+
+{
+  "session_id": "替换为上传返回的 session_id",
+  "message": "再看看销售额最高的前 5 个地区，并说明它们的共同特征"
+}
+
+### 清空对话历史（保留数据）
+POST http://127.0.0.1:8000/api/chat/reset?session_id=替换为上传返回的session_id
+
+### 查询会话文件信息
+GET http://127.0.0.1:8000/api/files/替换为上传返回的session_id
+
+### 交互式文档
+GET http://127.0.0.1:8000/docs
+
+###
