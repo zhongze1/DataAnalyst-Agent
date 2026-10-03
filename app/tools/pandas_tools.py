@@ -29,6 +29,48 @@ from app.tools.registry import tool
 pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 200)
 
+# 判定「值得告警」的阈值
+MISSING_WARN = 20.0        # 缺失率超过 20%
+OUTLIER_WARN = 5.0         # 离群点占比超过 5%
+SKEW_WARN = 2.0            # 绝对偏度超过 2 视为严重偏态
+
+
+# ----------------------------------------------------------------- 显示辅助
+def _fmt_count(count: int, total: int) -> str:
+    """把数量和占比拼在一起，如 ``12 (1.0%)``。"""
+    if not total:
+        return "n/a"
+    return f"{count:,} ({count / total * 100:.1f}%)"
+
+
+def _fmt_num(value: Any) -> str:
+    """紧凑数值显示：按量级自适应小数位。"""
+    if value is None:
+        return "NaN"
+    try:
+        if pd.isna(value):
+            return "NaN"
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, np.integer)):
+        return f"{value:,}"
+    number = float(value)
+    if number == 0:
+        return "0"
+    if abs(number) >= 1000:
+        return f"{number:,.1f}"
+    if abs(number) >= 1:
+        return f"{number:.2f}"
+    return f"{number:.4g}"
+
+
+def _fmt_date(value: Any) -> str:
+    try:
+        return pd.Timestamp(value).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return str(value)
+
+
 
 # ----------------------------------------------------------------- 元信息
 @tool(
@@ -67,6 +109,153 @@ def load_sheet(ctx: ToolContext, sheet: str) -> str:
         f"列名: {list(df.columns)}\n数据类型:\n{dtypes}\n"
         f"前 5 行:\n{df.head(5).to_string()}"
     )
+
+
+# ----------------------------------------------------------------- 聚合体检
+@tool(
+    name="data_health_check",
+    description=(
+        "数据体检（聚合工具，优先使用）：一次调用即可返回整表的 结构 + 缺失 + 异常值 信息。"
+        "包含行列数、每列类型/缺失率/唯一值/IQR 离群点数量与占比/偏度、类别列 Top 取值、"
+        "日期列取值范围，并汇总异常提示（高缺失、常量列、高基数疑似 ID、严重偏态、离群点过多、重复行）。"
+        "回答『整体数据结构 / 有没有缺失和异常值 / 数据质量如何』这类问题时优先调用它，"
+        "一次即可覆盖，不必再逐列调用其他探查工具。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "sheet": {"type": "string", "description": "工作表名，省略则用当前表"},
+            "columns": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "可选，只体检指定列",
+            },
+            "max_columns": {"type": "integer", "description": "最多体检多少列，默认 40"},
+            "top": {"type": "integer", "description": "类别列展示的 Top 取值个数，默认 3"},
+        },
+    },
+)
+def data_health_check(
+    ctx: ToolContext,
+    sheet: str | None = None,
+    columns: list[str] | None = None,
+    max_columns: int = 40,
+    top: int = 3,
+) -> str:
+    df = ctx.get_frame(sheet)
+    full_df = df
+    if columns:
+        missing = [c for c in columns if c not in df.columns]
+        if missing:
+            raise ToolError(f"列 {missing} 不存在。可用列: {list(df.columns)}")
+        df = df[list(columns)]
+    if df.shape[1] == 0:
+        raise ToolError("没有可体检的列。")
+
+    total_rows, total_cols = df.shape
+    limit = max(1, min(int(max_columns or 40), 200))
+    n_top = max(1, min(int(top or 3), 10))
+    scanned = df.columns[:limit]
+
+    lines = [f"[体检报告 · {ctx.active_sheet}] {total_rows:,} 行 × {total_cols} 列"]
+    lines.append(f"列清单: {list(df.columns)}")
+    if total_cols > limit:
+        lines.append(f"⚠ 列数较多，仅体检前 {limit} 列（可用 columns 参数指定需要体检的列）")
+
+    alerts: list[str] = []
+
+    for col in scanned:
+        series = df[col]
+        present = series.notna()
+        valid = int(present.sum())
+        n_unique = int(series.nunique(dropna=True))
+        missing_count = int((~present).sum())
+
+        bits = [
+            f"类型={series.dtype}",
+            f"缺失={_fmt_count(missing_count, total_rows)}",
+            f"唯一值={n_unique:,}",
+        ]
+        note = ""
+
+        if valid == 0:
+            note = "整列为空"
+        elif n_unique <= 1:
+            note = "常量列（无区分度）"
+        elif pd.api.types.is_bool_dtype(series):
+            top_values = series.value_counts()
+            note = "布尔列: " + "/".join(f"{k}:{v:,}" for k, v in top_values.items())
+        elif pd.api.types.is_datetime64_any_dtype(series):
+            low, high = series.min(), series.max()
+            if pd.notna(low) and pd.notna(high):
+                days = (pd.Timestamp(high) - pd.Timestamp(low)).days
+                bits.append(f"范围={_fmt_date(low)} ~ {_fmt_date(high)}")
+                bits.append(f"跨度={days:,}天")
+                if days > 0:
+                    per_day = valid / (days + 1)
+                    note = f"日均 {per_day:.1f} 条"
+        elif pd.api.types.is_numeric_dtype(series):
+            clean = series.dropna()
+            bits.append(f"均值={_fmt_num(clean.mean())}")
+            bits.append(f"中位数={_fmt_num(clean.median())}")
+            bits.append(f"最小={_fmt_num(clean.min())}")
+            bits.append(f"最大={_fmt_num(clean.max())}")
+            if len(clean) >= 4:
+                q1, q3 = clean.quantile(0.25), clean.quantile(0.75)
+                iqr = q3 - q1
+                if iqr > 0:
+                    outliers = int(
+                        ((clean < q1 - 1.5 * iqr) | (clean > q3 + 1.5 * iqr)).sum()
+                    )
+                    if outliers:
+                        rate = outliers / len(clean) * 100
+                        bits.append(f"离群点={_fmt_count(outliers, len(clean))}")
+                        if rate > OUTLIER_WARN:
+                            alerts.append(
+                                f"离群点偏多: {col}（IQR 口径，{outliers:,} 行，占 {rate:.1f}%）"
+                            )
+                skew = clean.skew()
+                if pd.notna(skew) and abs(float(skew)) > SKEW_WARN:
+                    direction = "右" if skew > 0 else "左"
+                    bits.append(f"偏度={skew:.2f}")
+                    alerts.append(
+                        f"严重{direction}偏: {col}（偏度 {skew:.2f}，均值受极端值影响，"
+                        f"建议看中位数）"
+                    )
+        else:
+            counts = series.dropna().astype(str).value_counts().head(n_top)
+            if len(counts):
+                note = "Top: " + "/".join(f"{k}({v:,})" for k, v in counts.items())
+
+        if missing_count and missing_count / total_rows * 100 > MISSING_WARN:
+            alerts.append(
+                f"高缺失: {col}（{missing_count:,} 行，占 "
+                f"{missing_count / total_rows * 100:.1f}%）"
+            )
+        if n_unique == valid and valid > 20 and not pd.api.types.is_bool_dtype(series):
+            alerts.append(f"高基数（疑似主键/ID）: {col}（唯一值 {n_unique:,} = 有效行数）")
+        if note:
+            bits.append(f"备注={note}")
+
+        lines.append(f"- {col}｜" + "｜".join(bits))
+
+    # 重复行检测只在全表体检时做：按列子集判断「重复」没有业务意义
+    if not columns:
+        duplicates = int(full_df.duplicated().sum())
+        if duplicates:
+            alerts.append(
+                f"完全重复行 {duplicates:,} 行（占 {duplicates / total_rows * 100:.1f}%）"
+            )
+
+    if alerts:
+        lines.append("")
+        lines.append(f"⚠ 关注点（共 {len(alerts)} 项）:")
+        lines.extend(f"  - {item}" for item in alerts)
+    else:
+        lines.append("")
+        lines.append("⚠ 关注点: 未发现明显问题（缺失率、离群点、偏度、重复行均在阈值内）")
+
+    return "\n".join(lines)
 
 
 # ----------------------------------------------------------------- 查看数据
