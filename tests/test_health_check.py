@@ -215,6 +215,17 @@ def test_unknown_column_is_rejected_with_available_list(registry: ToolRegistry) 
     assert "可用列" in error
 
 
+def test_empty_column_list_is_rejected(registry: ToolRegistry) -> None:
+    """回归测试：columns=[] 曾因真值判断被当成「未传」，静默退化成全表体检。"""
+    error = check_fails(frame(金额=[1.0, 2.0]), registry, columns=[])
+    assert "没有可体检的列" in error
+
+
+def test_omitted_columns_still_means_full_table(registry: ToolRegistry) -> None:
+    """对照组：不传 columns 才是全表体检。"""
+    assert "1 列" in check(frame(金额=[1.0, 2.0]), registry)
+
+
 # ============================================================ 数值格式
 def test_numbers_are_formatted_by_magnitude(registry: ToolRegistry) -> None:
     """千分位 / 小数位自适应，保证报告紧凑可读。"""

@@ -144,7 +144,9 @@ def data_health_check(
 ) -> str:
     df = ctx.get_frame(sheet)
     full_df = df
-    if columns:
+    # 用 `is not None` 而非真值判断：columns=[] 是「一个列都不要」，属于参数错误，
+    # 不能退化成全表体检
+    if columns is not None:
         missing = [c for c in columns if c not in df.columns]
         if missing:
             raise ToolError(f"列 {missing} 不存在。可用列: {list(df.columns)}")
@@ -240,7 +242,7 @@ def data_health_check(
         lines.append(f"- {col}｜" + "｜".join(bits))
 
     # 重复行检测只在全表体检时做：按列子集判断「重复」没有业务意义
-    if not columns:
+    if columns is None:
         duplicates = int(full_df.duplicated().sum())
         if duplicates:
             alerts.append(
