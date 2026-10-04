@@ -7,13 +7,16 @@
     AGENT_LLM_BASE_URL=https://api.deepseek.com/v1
     AGENT_LLM_MODEL=deepseek-chat
     AGENT_MAX_AGENT_STEPS=12
+    AGENT_STRICT_CONFIG=true         # 启动时配置不合法则直接拒绝启动
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -55,6 +58,148 @@ class Settings(BaseSettings):
     upload_dir: Path = UPLOAD_DIR
     max_upload_bytes: int = 50 * 1024 * 1024
     allowed_suffixes: tuple[str, ...] = (".xlsx", ".xlsm", ".xltx", ".xltm")
+
+    # ---- 启动行为 ----
+    # 开启时，配置校验不通过直接拒绝启动（fail-fast）；
+    # 关闭时只打 ERROR 日志，服务照常启动，便于临时带着问题调试
+    strict_config: bool = True
+
+
+# --------------------------------------------------------------------- 校验
+@dataclass(frozen=True)
+class ConfigProblem:
+    """一条配置问题。``hint`` 是给使用者的修复建议。"""
+
+    key: str
+    message: str
+    hint: str = ""
+
+
+def validate_settings(settings: Settings) -> list[ConfigProblem]:
+    """检查配置能否支撑正常运行，返回问题清单（空列表 = 可启动）。
+
+    刻意做成纯函数：不打印、不抛异常、不改配置。是否阻止启动由调用方决定
+    （见 ``Settings.strict_config``）。这样每条规则都能被独立测试。
+    """
+    problems: list[ConfigProblem] = []
+
+    if settings.llm_provider == "openai":
+        if not settings.llm_api_key.strip():
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_LLM_API_KEY",
+                    message="未配置 API Key",
+                    hint=(
+                        "在 .env 中填写 AGENT_LLM_API_KEY；"
+                        "或设 AGENT_LLM_PROVIDER=mock 用本地假模型离线跑通流程"
+                    ),
+                )
+            )
+        raw_url = settings.llm_base_url
+        parsed = urlparse(raw_url)
+        if (
+            any(char.isspace() for char in raw_url)
+            or parsed.scheme not in ("http", "https")
+            or not parsed.netloc
+        ):
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_LLM_BASE_URL",
+                    message=f"base_url 格式不合法: {raw_url!r}",
+                    hint=(
+                        "需带协议与主机名且不含空格，例如 https://api.deepseek.com/v1 "
+                        "或 http://localhost:11434/v1（保持你填写的原样，不要自动补 /v1）"
+                    ),
+                )
+            )
+        if not settings.llm_model.strip():
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_LLM_MODEL",
+                    message="未配置模型名",
+                    hint="例如 deepseek-chat / deepseek-flash / gpt-4o-mini",
+                )
+            )
+
+    if settings.max_agent_steps < 1:
+        problems.append(
+            ConfigProblem(
+                key="AGENT_MAX_AGENT_STEPS",
+                message=f"必须 >= 1，当前 {settings.max_agent_steps}",
+                hint="单次提问允许的「模型思考 + 工具调用」轮数上限",
+            )
+        )
+    if settings.max_tool_output_chars < 500:
+        problems.append(
+            ConfigProblem(
+                key="AGENT_MAX_TOOL_OUTPUT_CHARS",
+                message=f"过小会导致模型看不到数据，当前 {settings.max_tool_output_chars}",
+                hint="建议 >= 500，低于该值截断掉的表格会让模型无法分析",
+            )
+        )
+    if not settings.allowed_suffixes:
+        problems.append(
+            ConfigProblem(
+                key="allowed_suffixes",
+                message="未配置任何允许的文件后缀",
+                hint="至少需要 .xlsx",
+            )
+        )
+
+    problems.extend(_check_upload_dir(settings.upload_dir))
+    return problems
+
+
+def _check_upload_dir(upload_dir: Path) -> list[ConfigProblem]:
+    """上传目录必须存在且可写 —— 不可写时上传接口会 500。"""
+    probe = upload_dir / ".write_probe"
+    try:
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        return [
+            ConfigProblem(
+                key="upload_dir",
+                message=f"上传目录不可写: {upload_dir}（{exc.strerror or exc}）",
+                hint="检查路径是否存在、是否被占用，以及当前用户的写权限",
+            )
+        ]
+    return []
+
+
+def format_problems(problems: list[ConfigProblem]) -> str:
+    """把问题清单格式化成多行可读文本，用于异常信息。"""
+    lines = [f"配置校验未通过，共 {len(problems)} 项："]
+    for index, problem in enumerate(problems, 1):
+        lines.append(f"  {index}. [{problem.key}] {problem.message}")
+        if problem.hint:
+            lines.append(f"     建议: {problem.hint}")
+    return "\n".join(lines)
+
+
+def runtime_summary(settings: Settings) -> str:
+    """启动时打印的一行配置摘要。
+
+    只暴露端点、模型名和 Key 长度，**绝不包含 Key 内容**。
+    """
+    if settings.llm_provider == "mock":
+        llm_part = "provider=mock（离线演示，不联网）"
+    else:
+        endpoint = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
+        key_part = (
+            f"Key=已加载({len(settings.llm_api_key)} 字符)"
+            if settings.llm_api_key
+            else "Key=未配置"
+        )
+        llm_part = (
+            f"provider=openai | 模型={settings.llm_model} | 端点={endpoint} | {key_part}"
+        )
+    return (
+        f"{llm_part} | 上传目录={settings.upload_dir} "
+        f"| 最大步数={settings.max_agent_steps} "
+        f"| 严格配置={'开' if settings.strict_config else '关'}"
+    )
 
 
 @lru_cache

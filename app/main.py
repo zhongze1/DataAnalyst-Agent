@@ -10,7 +10,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.config import INDEX_FILE, STATIC_DIR, get_settings
+from app.config import (
+    INDEX_FILE,
+    STATIC_DIR,
+    format_problems,
+    get_settings,
+    runtime_summary,
+    validate_settings,
+)
 from app.dependencies import describe_settings, get_store
 from app.routers import chat, files
 
@@ -24,10 +31,28 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """启动即校验配置：宁可起不来，也不要带着错配置对外服务。"""
     settings = get_settings()
+
+    problems = validate_settings(settings)
+    if problems:
+        for problem in problems:
+            logger.error("配置错误 [%s] %s", problem.key, problem.message)
+            if problem.hint:
+                logger.error("    建议: %s", problem.hint)
+        if settings.strict_config:
+            # 校验放在 get_store() 之前：配置有问题时不该留下任何副作用
+            raise RuntimeError(format_problems(problems))
+        logger.warning(
+            "已忽略 %d 个配置问题（AGENT_STRICT_CONFIG=false），服务继续启动",
+            len(problems),
+        )
+
+    logger.info("运行时配置 | %s", runtime_summary(settings))
     store = get_store()
-    logger.info("DataAnalyst Agent %s 启动 | LLM=%s", __version__, describe_settings())
-    logger.info("已恢复 %d 个历史会话 | 数据目录: %s", len(store.list_sessions()), settings.upload_dir)
+    logger.info(
+        "已恢复 %d 个历史会话 | 会话目录: %s", len(store.list_sessions()), settings.upload_dir
+    )
     yield
     logger.info("服务关闭")
 
