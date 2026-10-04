@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterator
@@ -66,6 +67,24 @@ def isolate_settings(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Ite
         if hasattr(module, "get_settings"):
             monkeypatch.setattr(module, "get_settings", lambda: settings, raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def enable_info_logging() -> Iterator[None]:
+    """让 INFO 日志在测试中**真正被构造**。
+
+    不开的话，根 logger 默认 WARNING，各处 ``logger.info(...)`` 会被静默跳过 ——
+    extra 键与 LogRecord 内置属性冲突、格式化参数错误这类缺陷就会一路逃过测试。
+    """
+    root = logging.getLogger()
+    original_level, original_handlers = root.level, list(root.handlers)
+    root.setLevel(logging.INFO)
+    root.addHandler(logging.NullHandler())
+    try:
+        yield
+    finally:
+        root.setLevel(original_level)
+        root.handlers = original_handlers
 
 
 # --------------------------------------------------------------------- 数据

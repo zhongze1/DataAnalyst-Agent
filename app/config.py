@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     # 关闭时只打 ERROR 日志，服务照常启动，便于临时带着问题调试
     strict_config: bool = True
 
+    # ---- 日志 ----
+    # text = 人类可读；json = 结构化，供日志系统采集聚合
+    log_format: Literal["text", "json"] = "text"
+    log_level: str = "INFO"
+
 
 # --------------------------------------------------------------------- 校验
 @dataclass(frozen=True)

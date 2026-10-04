@@ -29,8 +29,24 @@ async function api(path, options = {}) {
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
-  if (!res.ok) throw new Error(data?.detail || `请求失败 (${res.status})`);
+  if (!res.ok) {
+    // 兼容两种错误体：当前是 {detail}，DA-003 之后是 {error:{code,message,request_id}}
+    const message = data?.error?.message || data?.detail || `请求失败 (${res.status})`;
+    const error = new Error(typeof message === "string" ? message : JSON.stringify(message));
+    error.requestId = data?.error?.request_id || res.headers.get("X-Request-ID") || null;
+    throw error;
+  }
   return data;
+}
+
+function escapeHtml(text) {
+  return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/* 错误气泡：带上 request_id，用户报障时直接报这个串就能定位到日志 */
+function errorHtml(err) {
+  const rid = err.requestId ? `<div class="rid">请求 ID: ${err.requestId}</div>` : "";
+  return `<p class="err">⚠ ${escapeHtml(err.message)}</p>${rid}`;
 }
 
 function fmtSize(bytes) {
@@ -145,7 +161,7 @@ async function uploadFile(file) {
     ));
   } catch (err) {
     setBusy(false);
-    addError(`上传失败：${err.message}`);
+    addMessage("assistant", errorHtml({ message: `上传失败：${err.message}`, requestId: err.requestId }));
   } finally {
     dom.progress.classList.add("hidden");
     dom.fileInput.value = "";
@@ -170,7 +186,7 @@ async function send(question) {
       thinking.innerHTML += `<p class="err">已达到最大工具调用次数，可点「清空对话」后重新提问。</p>`;
     }
   } catch (err) {
-    thinking.innerHTML = `<p class="err">⚠ ${err.message}</p>`;
+    thinking.innerHTML = errorHtml(err);
   } finally {
     setBusy(false);
     dom.input.focus();
@@ -229,7 +245,7 @@ dom.resetBtn.addEventListener("click", async () => {
     dom.messages.innerHTML = "";
     addMessage("assistant", "<p>对话已清空，数据仍然保留。开始新的分析吧。</p>");
   } catch (err) {
-    addError(err.message);
+    addMessage("assistant", errorHtml(err));
   }
 });
 

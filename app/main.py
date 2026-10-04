@@ -19,20 +19,19 @@ from app.config import (
     validate_settings,
 )
 from app.dependencies import describe_settings, get_store
+from app.logging_setup import setup_logging
+from app.middleware import RequestContextMiddleware
 from app.routers import chat, files
 
 logger = logging.getLogger(__name__)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动即校验配置：宁可起不来，也不要带着错配置对外服务。"""
     settings = get_settings()
+    # 先配日志再校验：否则配置错误会以无格式的 lastResort 输出落到 stderr
+    setup_logging(settings.log_format, settings.log_level)
 
     problems = validate_settings(settings)
     if problems:
@@ -64,6 +63,9 @@ def create_app() -> FastAPI:
         description="上传 Excel → 单 Agent Loop 自主调用 pandas 分析",
         lifespan=lifespan,
     )
+
+    # 必须最早挂载：异常路径与静态资源也要带 request_id
+    app.add_middleware(RequestContextMiddleware)
 
     app.include_router(files.router)
     app.include_router(chat.router)

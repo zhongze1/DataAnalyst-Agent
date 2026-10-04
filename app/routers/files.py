@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
+from app.context import set_session_id
 from app.dependencies import get_store
 from app.schemas import FileInfo, UploadResponse
 from app.storage.session_store import SessionStore
@@ -26,6 +27,17 @@ async def upload_excel(
         session = store.create(file.filename or "upload.xlsx", content)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    set_session_id(session.session_id)
+    logger.info(
+        "文件上传成功 | %s | %.1f KB | 工作表 %d 个",
+        session.filename,
+        session.size_bytes / 1024,
+        len(session.sheets),
+        # 注意：extra 的键不能撞 LogRecord 内置属性（filename/module/message 等），
+        # 否则 logging 会抛 KeyError 让整个请求 500
+        extra={"file_name": session.filename, "size_bytes": session.size_bytes},
+    )
 
     return UploadResponse(
         file=FileInfo(

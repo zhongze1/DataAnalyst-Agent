@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -70,11 +71,21 @@ class DataAnalystAgent:
     # ------------------------------------------------------------------ 对外
     async def run(self, session: Session | None, question: str) -> AgentResult:
         """处理一次用户提问。``session`` 为 None 表示用户还没上传文件。"""
+        started = time.perf_counter()
         if session is None:
-            return AgentResult(
-                answer="还没有检测到已上传的 Excel 文件。请先上传文件，我才能开始分析。",
-                stop_reason="no_file",
+            return self._finish(
+                AgentResult(
+                    answer="还没有检测到已上传的 Excel 文件。请先上传文件，我才能开始分析。",
+                    stop_reason="no_file",
+                ),
+                started,
             )
+
+        logger.info(
+            "Agent Loop 开始 | 问题 %d 字 | 可用工具 %d 个",
+            len(question),
+            len(self._tools.names()),
+        )
 
         ctx = ToolContext(
             session_id=session.session_id,
@@ -99,10 +110,13 @@ class DataAnalystAgent:
             except LLMError as exc:
                 logger.warning("模型调用失败: %s", exc)
                 session.messages = working[1:]  # 仅保留完整的历史 + 本次提问
-                return AgentResult(
-                    answer=f"模型调用失败：{exc}",
-                    steps=steps,
-                    stop_reason="llm_error",
+                return self._finish(
+                    AgentResult(
+                        answer=f"模型调用失败：{exc}",
+                        steps=steps,
+                        stop_reason="llm_error",
+                    ),
+                    started,
                 )
 
             usage = response.usage or usage
@@ -110,11 +124,14 @@ class DataAnalystAgent:
 
             if not response.has_tool_calls:
                 session.messages = working[1:]
-                return AgentResult(
-                    answer=response.content or "（模型未返回文本内容）",
-                    steps=steps,
-                    stop_reason="final",
-                    usage=usage,
+                return self._finish(
+                    AgentResult(
+                        answer=response.content or "（模型未返回文本内容）",
+                        steps=steps,
+                        stop_reason="final",
+                        usage=usage,
+                    ),
+                    started,
                 )
 
             # 执行工具：pandas 是阻塞型 CPU 任务，放到线程池避免卡住事件循环
@@ -160,7 +177,32 @@ class DataAnalystAgent:
             answer = f"已达到最大调用次数，且收尾请求失败：{exc}"
             session.messages = working[1 : 1 + len(session.messages)]
 
-        return AgentResult(answer=answer, steps=steps, stop_reason=stop_reason, usage=usage)
+        return self._finish(
+            AgentResult(answer=answer, steps=steps, stop_reason=stop_reason, usage=usage),
+            started,
+        )
+
+    # ------------------------------------------------------------------ 内部
+    @staticmethod
+    def _finish(result: AgentResult, started: float) -> AgentResult:
+        """统一的收尾出口：所有 return 都经过这里，保证一定留下耗时与用量日志。"""
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        failed = sum(1 for step in result.steps if not step.ok)
+        logger.info(
+            "Agent Loop 结束 | 工具 %d 次(失败 %d) | 终止原因 %s | %.1fms",
+            len(result.steps),
+            failed,
+            result.stop_reason,
+            duration_ms,
+            extra={
+                "steps": len(result.steps),
+                "failed_steps": failed,
+                "stop_reason": result.stop_reason,
+                "duration_ms": duration_ms,
+                "usage": result.usage or None,
+            },
+        )
+        return result
 
     # ------------------------------------------------------------------ 内部
 

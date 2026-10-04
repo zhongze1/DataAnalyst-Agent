@@ -114,6 +114,7 @@ body {
 .bubble pre code { color: inherit; background: none; }
 .bubble ul, .bubble ol { margin: 8px 0 8px 20px; }
 .bubble .err { color: var(--err); }
+.bubble .rid { margin-top: 6px; font-size: 11px; color: var(--muted); font-family: Consolas, Monaco, monospace; }
 
 /* ---------------- 工具调用轨迹 ---------------- */
 .steps { margin-top: 10px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }

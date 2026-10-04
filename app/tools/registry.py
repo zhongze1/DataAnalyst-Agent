@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Iterable
+import time
+from typing import Any, Callable
 
+from app.logging_setup import describe_arguments
 from app.tools.base import Tool, ToolContext, ToolError
 
 logger = logging.getLogger(__name__)
@@ -60,15 +62,33 @@ class ToolRegistry:
         """执行工具，返回 (是否成功, 文本结果)。**永不抛异常**。"""
         tool = self._tools.get(name)
         if tool is None:
+            logger.warning("工具不存在: %s", name)
             return False, f"工具不存在: {name}。可用工具: {', '.join(self.names())}"
+        started = time.perf_counter()
         try:
-            return True, tool.run(ctx, arguments)
+            result = tool.run(ctx, arguments)
         except ToolError as exc:
-            logger.info("tool %s 业务失败: %s", name, exc)
+            logger.info(
+                "工具业务失败 %s(%s): %s",
+                name,
+                describe_arguments(arguments or {}),
+                exc,
+            )
             return False, f"[ToolError] {exc}"
         except Exception as exc:  # pragma: no cover - 兜底，防止工具把整个 Loop 打断
-            logger.exception("tool %s 未预期异常", name)
+            logger.exception("工具未预期异常 %s", name)
             return False, f"[RuntimeError] {type(exc).__name__}: {exc}"
+        else:
+            duration_ms = round((time.perf_counter() - started) * 1000, 1)
+            logger.info(
+                "工具完成 %s(%s) | %.1fms | 结果 %d 字符",
+                name,
+                describe_arguments(arguments or {}),
+                duration_ms,
+                len(result),
+                extra={"tool": name, "duration_ms": duration_ms},
+            )
+            return True, result
 
 
 registry = ToolRegistry()
