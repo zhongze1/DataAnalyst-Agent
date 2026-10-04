@@ -20,6 +20,12 @@ from typing import Any
 import pandas as pd
 
 from app.config import UPLOAD_DIR, get_settings
+from app.errors import (
+    FileEmptyError,
+    FileParseError,
+    FileTooLargeError,
+    FileTypeError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +81,14 @@ class SessionStore:
         settings = get_settings()
         suffix = Path(filename).suffix.lower()
         if suffix not in settings.allowed_suffixes:
-            raise ValueError(
-                f"暂不支持的文件类型 {suffix!r}，仅支持: {', '.join(settings.allowed_suffixes)}"
+            raise FileTypeError(
+                f"暂不支持的文件类型 {suffix or '（无后缀）'}，"
+                f"仅支持: {', '.join(settings.allowed_suffixes)}"
             )
         if not content:
-            raise ValueError("上传内容为空。")
+            raise FileEmptyError()
         if len(content) > settings.max_upload_bytes:
-            limit_mb = settings.max_upload_bytes // (1024 * 1024)
-            raise ValueError(f"文件超过 {limit_mb}MB 限制。")
+            raise FileTooLargeError(settings.max_upload_bytes)
 
         session_id = uuid.uuid4().hex[:12]
         folder = self._root / session_id
@@ -92,10 +98,13 @@ class SessionStore:
 
         try:
             sheets = self.list_sheet_names(target)
-        except Exception as exc:  # 解析失败则清理目录，避免留下脏会话
+        except Exception as exc:
+            # 解析失败则清理目录，避免留下脏会话。
+            # 真实原因（openpyxl 报错细节）只进日志，不进响应体。
             target.unlink(missing_ok=True)
             folder.rmdir()
-            raise ValueError(f"无法解析 Excel 文件: {exc}") from exc
+            logger.warning("Excel 解析失败 | 文件名=%s | 原因=%s", filename, exc, exc_info=True)
+            raise FileParseError(cause=exc) from exc
 
         session = Session(
             session_id=session_id,

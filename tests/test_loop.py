@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.agent.loop import response_to_assistant_message
@@ -53,10 +55,15 @@ async def test_step_limit_triggers_wrap_up(make_agent, session) -> None:
     assert session.messages
 
 
-async def test_llm_error_is_reported_as_stop_reason(make_agent, session) -> None:
+async def test_llm_error_is_reported_as_stop_reason(make_agent, session, caplog) -> None:
+    caplog.set_level(logging.ERROR)
     result = await make_agent(BrokenLLM()).run(session, "分析")
     assert result.stop_reason == "llm_error"
-    assert "模拟的模型故障" in result.answer
+    # DA-003 脱敏要求：厂商/网络异常细节不得进入 answer
+    assert "模拟的模型故障" not in result.answer
+    assert "模型服务调用失败" in result.answer
+    # 但必须留痕，否则无法排查
+    assert "模拟的模型故障" in caplog.text
     # 模型故障时至少保留用户提问，不能留下半截工具轨迹
     assert [m["role"] for m in session.messages] == ["user"]
 

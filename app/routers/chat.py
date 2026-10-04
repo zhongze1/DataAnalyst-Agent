@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import logging
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from app.agent.loop import DataAnalystAgent
 from app.context import set_session_id
 from app.dependencies import get_agent, get_store
-from app.schemas import ChatRequest, ChatResponse, ToolStep
+from app.errors import SessionNotFoundError
+from app.schemas import ERROR_RESPONSES, ChatRequest, ChatResponse, ToolStep
 from app.storage.session_store import SessionStore
 
-logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/api/chat", tags=["chat"])
+router = APIRouter(prefix="/api/chat", tags=["chat"], responses=ERROR_RESPONSES)
 
 
 @router.post("", response_model=ChatResponse)
@@ -26,7 +23,7 @@ async def chat(
     """单 Agent Loop 的入口：一次提问 = 一次完整的「思考 → 调工具 → 观察 → 回答」。"""
     session = store.get(payload.session_id)
     if payload.session_id and session is None:
-        raise HTTPException(status_code=404, detail="会话不存在或已过期，请重新上传文件。")
+        raise SessionNotFoundError()
 
     # 绑定会话上下文：本次请求内所有日志都会自动带上 session_id
     set_session_id(session.session_id if session else None)
@@ -59,6 +56,6 @@ async def reset_conversation(
     """清空对话历史（保留已上传的数据），开始一轮新的分析。"""
     session = store.get(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="会话不存在。")
+        raise SessionNotFoundError()
     store.reset_messages(session)
     return {"reset": True}

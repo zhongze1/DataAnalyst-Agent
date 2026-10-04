@@ -34,6 +34,8 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex[:12]
         request_token = request_id_var.set(request_id)
+        # 写进 scope：异常处理器运行时 ContextVar 已被重置，只能从 scope 取
+        request.scope["request_id"] = request_id
         # 每个请求都从「无会话」开始，杜绝上一个请求的 session_id 串味
         session_token = set_session_id(None)
         started = time.perf_counter()

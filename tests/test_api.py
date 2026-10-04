@@ -49,7 +49,7 @@ def test_upload_rejects_unsupported_type(client: TestClient) -> None:
         files={"file": ("note.txt", b"hello", "text/plain")},
     )
     assert response.status_code == 400
-    assert "支持" in response.json()["detail"]
+    assert response.json()["error"]["code"] == "FILE_TYPE_UNSUPPORTED"
 
 
 def test_upload_rejects_non_excel_content(client: TestClient, garbage_bytes: bytes) -> None:
@@ -59,7 +59,7 @@ def test_upload_rejects_non_excel_content(client: TestClient, garbage_bytes: byt
         files={"file": ("fake.xlsx", garbage_bytes, "application/vnd.ms-excel")},
     )
     assert response.status_code == 400
-    assert "无法解析" in response.json()["detail"]
+    assert response.json()["error"]["code"] == "FILE_PARSE_ERROR"
 
 
 def test_upload_empty_file_rejected(client: TestClient) -> None:

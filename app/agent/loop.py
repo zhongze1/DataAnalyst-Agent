@@ -108,11 +108,21 @@ class DataAnalystAgent:
                 # 模型推理（网络 IO，异步）
                 response = await self._llm.chat(working, self._tools.openai_schemas())
             except LLMError as exc:
-                logger.warning("模型调用失败: %s", exc)
+                # 原始异常可能含厂商响应体/端点等内部信息，只进日志；
+                # 用户看到的是脱敏文案，排查靠前端展示的 request_id
+                logger.error(
+                    "模型调用失败 | %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    extra={"error_code": "LLM_SERVICE_ERROR"},
+                )
                 session.messages = working[1:]  # 仅保留完整的历史 + 本次提问
                 return self._finish(
                     AgentResult(
-                        answer=f"模型调用失败：{exc}",
+                        answer=(
+                            "模型服务调用失败，暂时无法完成分析。"
+                            "服务端已记录详细原因，请稍后重试。"
+                        ),
                         steps=steps,
                         stop_reason="llm_error",
                     ),

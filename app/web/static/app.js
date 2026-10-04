@@ -29,11 +29,14 @@ async function api(path, options = {}) {
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+  // 任何响应都带 X-Request-ID，200 的异常场景（如模型故障）也要能报障
+  state.lastRequestId = res.headers.get("X-Request-ID") || null;
   if (!res.ok) {
-    // 兼容两种错误体：当前是 {detail}，DA-003 之后是 {error:{code,message,request_id}}
+    // 统一错误体：{error:{code,message,request_id}}；detail 兜底兼容旧格式
     const message = data?.error?.message || data?.detail || `请求失败 (${res.status})`;
     const error = new Error(typeof message === "string" ? message : JSON.stringify(message));
-    error.requestId = data?.error?.request_id || res.headers.get("X-Request-ID") || null;
+    error.code = data?.error?.code || null;
+    error.requestId = data?.error?.request_id || state.lastRequestId;
     throw error;
   }
   return data;
@@ -184,6 +187,9 @@ async function send(question) {
     thinking.innerHTML = renderMarkdown(data.answer) + renderSteps(data.steps);
     if (data.stop_reason === "max_steps") {
       thinking.innerHTML += `<p class="err">已达到最大工具调用次数，可点「清空对话」后重新提问。</p>`;
+    } else if (data.stop_reason === "llm_error") {
+      // 模型故障：把 request_id 一并给出，方便对照服务端日志排查
+      thinking.innerHTML += errorHtml({ message: data.answer, requestId: state.lastRequestId });
     }
   } catch (err) {
     thinking.innerHTML = errorHtml(err);

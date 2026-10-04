@@ -161,12 +161,13 @@ def test_lifespan_refuses_to_start_with_bad_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """DA-001 的核心诉求：坏配置必须起不来，而不是等用户提问才 500。"""
+    from app.errors import ConfigError
     from app.main import app
 
     bad = _settings(tmp_path, llm_api_key="", strict_config=True)
     monkeypatch.setattr("app.main.get_settings", lambda: bad)
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(ConfigError) as excinfo:
         with TestClient(app):
             pass  # pragma: no cover - 正常情况下不会执行到这里
     assert "AGENT_LLM_API_KEY" in str(excinfo.value)

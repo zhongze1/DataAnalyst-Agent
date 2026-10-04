@@ -52,3 +52,25 @@ class HealthResponse(BaseModel):
     status: str
     provider: str
     model: str
+
+
+# ----------------------------------------------------------------- 错误响应
+class ErrorDetail(BaseModel):
+    """统一错误体。``message`` 保证是脱敏后的人工文案。"""
+
+    code: str = Field(description="机器可读错误码，如 FILE_PARSE_ERROR")
+    message: str = Field(description="面向用户的可读文案")
+    request_id: str | None = Field(default=None, description="用于服务端日志排查")
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+
+# 挂到 APIRouter 上，让 /docs 展示统一的错误结构
+ERROR_RESPONSES: dict[int | str, dict] = {
+    400: {"model": ErrorResponse, "description": "请求不合法（文件类型/为空/无法解析）"},
+    404: {"model": ErrorResponse, "description": "会话或接口不存在"},
+    413: {"model": ErrorResponse, "description": "文件超过大小限制"},
+    500: {"model": ErrorResponse, "description": "服务器内部错误"},
+}

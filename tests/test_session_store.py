@@ -7,6 +7,7 @@ import json
 import pandas as pd
 import pytest
 
+from app.errors import FileEmptyError, FileParseError, FileTooLargeError, FileTypeError
 from app.storage.session_store import META_NAME, SessionStore
 
 
@@ -25,24 +26,24 @@ def test_create_writes_file_and_meta(store: SessionStore, sample_xlsx: bytes) ->
 
 
 def test_rejects_unsupported_suffix(store: SessionStore, sample_xlsx: bytes) -> None:
-    with pytest.raises(ValueError, match="暂不支持的文件类型"):
+    with pytest.raises(FileTypeError, match="暂不支持的文件类型"):
         store.create("data.csv", sample_xlsx)
 
 
 def test_rejects_empty_content(store: SessionStore) -> None:
-    with pytest.raises(ValueError, match="上传内容为空"):
+    with pytest.raises(FileEmptyError):
         store.create("empty.xlsx", b"")
 
 
 def test_rejects_oversized_file(store: SessionStore, settings, sample_xlsx: bytes) -> None:
     settings.max_upload_bytes = 10
-    with pytest.raises(ValueError, match="超过"):
+    with pytest.raises(FileTooLargeError):
         store.create("big.xlsx", sample_xlsx)
 
 
 def test_parse_failure_leaves_no_dirty_session(store: SessionStore, garbage_bytes: bytes) -> None:
     """解析失败必须清理干净，不留半截目录污染会话列表。"""
-    with pytest.raises(ValueError, match="无法解析"):
+    with pytest.raises(FileParseError):
         store.create("fake.xlsx", garbage_bytes)
     assert store.list_sessions() == []
 
