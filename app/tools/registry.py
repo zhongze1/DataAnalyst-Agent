@@ -28,6 +28,7 @@ class ToolRegistry:
         name: str,
         description: str,
         parameters: dict[str, Any] | None = None,
+        uses_active_frame: bool = False,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """装饰器：把函数注册成一个工具。"""
 
@@ -38,6 +39,7 @@ class ToolRegistry:
                     description=description,
                     parameters=parameters or {"type": "object", "properties": {}},
                     func=func,
+                    uses_active_frame=uses_active_frame,
                 )
             )
             return func

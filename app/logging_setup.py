@@ -81,6 +81,11 @@ def setup_logging(fmt: str = "text", level: str = "INFO") -> None:
     root.addHandler(handler)
     root.setLevel(level.upper())
 
+    # httpx 每发一次请求就打一行 INFO，只占篇幅没有信息量（我们自己的埋点
+    # 记录了耗时、模型、token），这里压到 WARNING。
+    for noisy in ("httpx", "httpcore", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 def describe_arguments(arguments: dict[str, Any]) -> str:
     """把工具参数压成「名称(类型,规模)」，**丢弃内容**。

@@ -96,7 +96,7 @@ def test_read_frame_and_sheet_names(store: SessionStore, sample_xlsx: bytes) -> 
     assert SessionStore.list_sheet_names(session.path) == ["明细", "摘要"]
     frame = SessionStore.read_frame(session.path, "明细")
     assert isinstance(frame, pd.DataFrame)
-    assert frame.shape == (22, 5)
+    assert frame.shape == (22, 6)
     assert "备注" in frame.columns
 
 

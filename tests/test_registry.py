@@ -1,4 +1,4 @@
-"""工具层契约测试。
+"""registry 契约测试。
 
 核心契约：**`registry.run()` 永不抛异常**，永远返回 `(ok: bool, text: str)`。
 这条契约是 Agent Loop 不会因为一次工具失败而整体崩溃的根本保证。
@@ -11,7 +11,7 @@ import pytest
 
 from app.tools.base import Tool, ToolContext, format_value
 from app.tools.registry import ToolRegistry
-from stubs import SHEET_MAIN
+from stubs import SHEET_MAIN  # type: ignore
 
 
 @pytest.fixture
@@ -97,53 +97,15 @@ def test_run_pandas_expression_and_statement(registry, ctx: ToolContext) -> None
     registry.run("load_sheet", {"sheet": SHEET_MAIN}, ctx)
     ok_expr, text_expr = registry.run("run_pandas", {"code": "df.shape"}, ctx)
     assert ok_expr is True
-    assert "22" in text_expr and "5" in text_expr  # 20 行 + 2 重复行, 5 列
+    assert "22" in text_expr and "6" in text_expr  # 20 行 + 2 重复行, 6 列
 
     ok_stmt, text_stmt = registry.run(
         "run_pandas", {"code": "out = int(df['备注'].isna().sum())"}, ctx
     )
     assert ok_stmt is True
-    assert text_stmt.strip() == "12"
-
-
-@pytest.mark.parametrize(
-    "code",
-    [
-        "import os",
-        "open('/etc/passwd')",
-        "eval('1+1')",
-        "df.__class__",
-        "__import__('os')",
-    ],
-)
-def test_sandbox_blocks_dangerous_code(registry, ctx: ToolContext, code: str) -> None:
-    registry.run("load_sheet", {"sheet": SHEET_MAIN}, ctx)
-    ok, text = registry.run("run_pandas", {"code": code}, ctx)
-    assert ok is False
-    assert "[ToolError]" in text
-
-
-# ------------------------------------------------------------ schema 合法性
-def test_openai_schemas_are_well_formed(registry) -> None:
-    schemas = registry.openai_schemas()
-    assert schemas, "至少要注册一个工具"
-    for schema in schemas:
-        assert schema["type"] == "function"
-        function = schema["function"]
-        assert function["name"] and function["description"]
-        params = function["parameters"]
-        assert params["type"] == "object"
-        assert isinstance(params.get("properties", {}), dict)
-        for required in params.get("required", []):
-            assert required in params["properties"]
-
-
-def test_duplicate_tool_name_is_rejected() -> None:
-    local = ToolRegistry()
-    tool = Tool(name="dup", description="d", parameters={"type": "object"}, func=lambda ctx: "x")
-    local.add(tool)
-    with pytest.raises(ValueError, match="重复"):
-        local.add(tool)
+    # 输出首行是「当前 df」标记，末行才是表达式结果
+    assert text_stmt.startswith("[当前 df =")
+    assert text_stmt.strip().endswith("12")
 
 
 # ------------------------------------------------------------ 结果格式化

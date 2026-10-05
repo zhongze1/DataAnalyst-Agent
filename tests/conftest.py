@@ -109,6 +109,7 @@ def sample_xlsx() -> bytes:
         "下单日期": pd.date_range("2025-01-01", periods=20, freq="D"),
         "区域": ["华东", "华北", "华南"] * 6 + ["西南", "东北"],
         "销售额": sales,
+        "销量": [3, 5, 2, 8, 1, 4, 6, 2, 9, 3, 1, 5, 7, 2, 4, 6, 3, 5, 2, 8],
         "备注": ["企业采购"] * 10 + [None] * 10,
     })
     frame = pd.concat([frame, frame.tail(2)], ignore_index=True)  # 制造 2 行重复

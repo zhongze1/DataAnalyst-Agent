@@ -27,6 +27,10 @@ class ToolContext:
     """一次提问过程中，Agent 持有的数据上下文。
 
     ``frames`` 以「工作表名」为键缓存已加载的 DataFrame，避免重复读盘。
+
+    ``active_sheet`` 是「模型当前正在分析哪张表」。它**只应由显式意图改变**
+    （``load_sheet`` 或 ``run_pandas(sheet=...)``）——只读工具若偷偷改写它，
+    模型会在体检完其他表后发现自己写的代码作用在错的表上。
     """
 
     session_id: str
@@ -36,11 +40,18 @@ class ToolContext:
     frames: dict[str, pd.DataFrame] = field(default_factory=dict)
     active_sheet: str | None = None
 
-    def get_frame(self, sheet: str | None = None) -> pd.DataFrame:
-        """取出（必要时加载）某个工作表的 DataFrame。"""
+    def get_frame(self, sheet: str | None = None, *, activate: bool = False) -> pd.DataFrame:
+        """取出（必要时加载）某个工作表的 DataFrame。
+
+        Args:
+            sheet: 目标工作表；``None`` 表示用当前工作表。
+            activate: 是否把该表设为「当前工作表」。只读工具必须传 ``False``，
+                否则会产生副作用：连续体检三张表后，模型后续的 ``df`` 会指向
+                最后一张，而它以为还是第一张。
+        """
         from app.storage.session_store import SessionStore  # 延迟导入避免循环依赖
 
-        name = (sheet or self.active_sheet or (self.sheets[0] if self.sheets else None))
+        name = sheet or self.active_sheet or (self.sheets[0] if self.sheets else None)
         if not name:
             raise ToolError("尚未加载任何数据，请先调用 load_sheet。")
         if name not in self.frames:
@@ -49,18 +60,42 @@ class ToolContext:
                     f"工作表 {name!r} 不存在。可用工作表: {', '.join(self.sheets) or '无'}"
                 )
             self.frames[name] = SessionStore.read_frame(self.file_path, name)
-        self.active_sheet = name
+        # 首次使用时初始化是必要的（否则模型无从知道 df 是哪张表）；
+        # 之后只有显式 activate 才允许切换。
+        if activate or self.active_sheet is None:
+            self.active_sheet = name
         return self.frames[name]
+
+    def describe_active_frame(self) -> str:
+        """生成「当前 df」标记，追加到工具输出里。
+
+        没有它，模型无法知道 ``run_pandas`` 里的 ``df`` 到底指向哪张表 ——
+        这正是「KeyError: 销售额」这类误判的根源。
+        """
+        name = self.active_sheet
+        if name is None:
+            return "[当前 df = 未加载]"
+        frame = self.frames.get(name)
+        if frame is None:
+            return f"[当前 df = {name}]"
+        rows, cols = frame.shape
+        return f"[当前 df = {name}（{rows:,} 行 × {cols} 列）]"
 
 
 @dataclass
 class Tool:
-    """可被模型调用的函数。"""
+    """可被模型调用的函数。
+
+    ``uses_active_frame`` 标记该工具是否读取「当前 df」。为 True 时，
+    ``run()`` 会自动在输出首行加上当前工作表标记 —— 由框架保证，
+    不依赖每个工具作者自觉。
+    """
 
     name: str
     description: str
     parameters: dict[str, Any]
     func: Callable[..., Any]
+    uses_active_frame: bool = False
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -77,7 +112,10 @@ class Tool:
         arguments = arguments or {}
         self._validate(arguments)
         value = self.func(ctx, **arguments)
-        return format_value(value)
+        text = format_value(value)
+        if self.uses_active_frame:
+            return f"{ctx.describe_active_frame()}\n{text}"
+        return text
 
     def _validate(self, arguments: dict[str, Any]) -> None:
         schema = self.parameters or {}

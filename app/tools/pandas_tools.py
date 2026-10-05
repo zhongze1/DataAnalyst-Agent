@@ -1,4 +1,4 @@
-"""pandas 分析工具集 —— 模型的「手和眼」。
+﻿"""pandas 分析工具集 —— 模型的「手和眼」。
 
 工具清单（按推荐调用顺序）：
     list_sheets          列出工作表
@@ -92,7 +92,10 @@ def list_sheets(ctx: ToolContext) -> str:
 
 @tool(
     name="load_sheet",
-    description="把指定工作表读入内存作为 DataFrame，返回行列数、列名与数据类型。这是所有后续分析的前提。",
+    description=(
+        "把指定工作表设为「当前工作表」，返回行列数、列名与数据类型。"
+        "这是切换分析目标的唯一入口：run_pandas 未指定 sheet 时作用于这里设定的表。"
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -102,10 +105,11 @@ def list_sheets(ctx: ToolContext) -> str:
     },
 )
 def load_sheet(ctx: ToolContext, sheet: str) -> str:
-    df = ctx.get_frame(sheet)
+    # load_sheet 是「显式切换工作表」的唯一入口，必须 activate
+    df = ctx.get_frame(sheet, activate=True)
     dtypes = "\n".join(f"  - {col}: {dtype}" for col, dtype in df.dtypes.items())
     return (
-        f"已加载工作表 {sheet!r}: shape={df.shape}\n"
+        f"已切换当前工作表为 {sheet!r}: shape={df.shape}\n"
         f"列名: {list(df.columns)}\n数据类型:\n{dtypes}\n"
         f"前 5 行:\n{df.head(5).to_string()}"
     )
@@ -134,6 +138,7 @@ def load_sheet(ctx: ToolContext, sheet: str) -> str:
             "top": {"type": "integer", "description": "类别列展示的 Top 取值个数，默认 3"},
         },
     },
+    uses_active_frame=True,
 )
 def data_health_check(
     ctx: ToolContext,
@@ -142,7 +147,7 @@ def data_health_check(
     max_columns: int = 40,
     top: int = 3,
 ) -> str:
-    df = ctx.get_frame(sheet)
+    df = ctx.get_frame(sheet)  # 只读：不切换当前工作表
     full_df = df
     # 用 `is not None` 而非真值判断：columns=[] 是「一个列都不要」，属于参数错误，
     # 不能退化成全表体检
@@ -271,9 +276,10 @@ def data_health_check(
             "rows": {"type": "integer", "description": "返回行数，默认 10，最大 50"},
         },
     },
+    uses_active_frame=True,
 )
 def preview_rows(ctx: ToolContext, sheet: str | None = None, rows: int = 10) -> str:
-    df = ctx.get_frame(sheet)
+    df = ctx.get_frame(sheet)  # 只读：不切换当前工作表
     n = max(1, min(int(rows or 10), 50))
     return f"[工作表 {ctx.active_sheet}]\n{df.head(n).to_string()}"
 
@@ -288,9 +294,10 @@ def preview_rows(ctx: ToolContext, sheet: str | None = None, rows: int = 10) -> 
             "column": {"type": "string", "description": "只分析某一列，省略则分析全部列"},
         },
     },
+    uses_active_frame=True,
 )
 def column_profile(ctx: ToolContext, sheet: str | None = None, column: str | None = None) -> str:
-    df = ctx.get_frame(sheet)
+    df = ctx.get_frame(sheet)  # 只读：不切换当前工作表
     if column:
         if column not in df.columns:
             raise ToolError(f"列 {column!r} 不存在。可用列: {list(df.columns)}")
@@ -332,6 +339,7 @@ def column_profile(ctx: ToolContext, sheet: str | None = None, column: str | Non
         },
         "required": ["column"],
     },
+    uses_active_frame=True,
 )
 def value_counts(
     ctx: ToolContext,
@@ -339,7 +347,7 @@ def value_counts(
     sheet: str | None = None,
     top: int = 10,
 ) -> str:
-    df = ctx.get_frame(sheet)
+    df = ctx.get_frame(sheet)  # 只读：不切换当前工作表
     if column not in df.columns:
         raise ToolError(f"列 {column!r} 不存在。可用列: {list(df.columns)}")
     counts = df[column].value_counts(dropna=False).head(max(1, min(int(top or 10), 50)))
@@ -360,13 +368,14 @@ def value_counts(
             },
         },
     },
+    uses_active_frame=True,
 )
 def describe_dataframe(
     ctx: ToolContext,
     sheet: str | None = None,
     columns: list[str] | None = None,
 ) -> str:
-    df = ctx.get_frame(sheet)
+    df = ctx.get_frame(sheet)  # 只读：不切换当前工作表
     target = df[list(columns)] if columns else df
     numeric = target.select_dtypes(include="number")
     if numeric.empty:
@@ -388,6 +397,7 @@ def describe_dataframe(
             "top": {"type": "integer", "description": "只返回相关性最高的 N 对，默认 10"},
         },
     },
+    uses_active_frame=True,
 )
 def correlation(
     ctx: ToolContext,
@@ -395,7 +405,7 @@ def correlation(
     method: str = "pearson",
     top: int = 10,
 ) -> str:
-    df = ctx.get_frame(sheet)
+    df = ctx.get_frame(sheet)  # 只读：不切换当前工作表
     method = (method or "pearson").lower()
     if method not in {"pearson", "spearman", "kendall"}:
         raise ToolError("method 只能是 pearson / spearman / kendall")
@@ -437,8 +447,38 @@ _SAFE_BUILTINS = {
 }
 
 
-def _validate_code(code: str) -> ast.Expression | ast.Module:
-    """用 AST 做白名单校验：禁止 import、dunder、危险内建函数。"""
+_PRELOADED = {"pandas": pd, "numpy": np}
+
+
+def _strip_preloaded_imports(tree: ast.Module) -> dict[str, Any]:
+    """移除 `import pandas as pd` 这类已被预置的导入。
+
+    模型有写 import 的肌肉记忆，而 pd / np 本来就在沙箱里。与其报错浪费一轮，
+    不如直接删掉，并把别名接回作用域（`import pandas as pdd` 之后 pdd 依然可用）。
+    """
+    alias: dict[str, Any] = {}
+    keep: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                root = item.name.split(".")[0]
+                if root not in _PRELOADED:
+                    raise ToolError(
+                        f"禁止 import {item.name}，沙箱只提供 pandas / numpy。"
+                    )
+                if item.asname:
+                    alias[item.asname] = _PRELOADED[root]
+            continue
+        keep.append(node)
+    tree.body = keep
+    return alias
+
+
+def _validate_code(code: str) -> tuple[ast.Module, dict[str, Any]]:
+    """AST 白名单校验：禁止 import、dunder、危险内建函数。
+
+    返回 (模块 AST, 被剥离 import 的别名映射)。
+    """
     limit = get_settings().max_sandbox_code_lines
     if len([ln for ln in code.splitlines() if ln.strip()]) > limit:
         raise ToolError(f"代码过长（超过 {limit} 行），请拆成多次调用。")
@@ -448,9 +488,11 @@ def _validate_code(code: str) -> ast.Expression | ast.Module:
     except SyntaxError as exc:
         raise ToolError(f"代码语法错误: 第 {exc.lineno} 行 {exc.msg}") from exc
 
+    alias = _strip_preloaded_imports(tree)
+
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            raise ToolError("禁止 import，请直接使用已提供的 pd / np / df。")
+        if isinstance(node, ast.ImportFrom):
+            raise ToolError("禁止 from ... import，请直接使用已提供的 pd / np / df。")
         if isinstance(node, ast.Name) and node.id in _BANNED_NAMES:
             raise ToolError(f"禁止使用 {node.id}()。")
         if isinstance(node, ast.Attribute):
@@ -463,12 +505,13 @@ def _validate_code(code: str) -> ast.Expression | ast.Module:
                 raise ToolError("禁止访问解释器内部属性。")
             if any(part.startswith("__") for part in parts):
                 raise ToolError("禁止访问以下划线开头的属性。")
-    return tree
+    return tree, alias
 
 
-def _run_code(ctx: ToolContext, code: str) -> Any:
-    tree = _validate_code(code)
-    df = ctx.get_frame()
+def _run_code(ctx: ToolContext, code: str, sheet: str | None = None) -> Any:
+    tree, alias = _validate_code(code)
+    # 显式指定 sheet 时切换工作表：这是模型的分析意图
+    df = ctx.get_frame(sheet, activate=sheet is not None)
 
     buffer: list[str] = []
     safe_print = lambda *args, **kwargs: buffer.append(" ".join(str(a) for a in args))  # noqa: E731
@@ -478,7 +521,10 @@ def _run_code(ctx: ToolContext, code: str) -> Any:
         "np": np,
         "df": df,
         "sheet": ctx.active_sheet,
+        "columns": list(df.columns),
     }
+    # 还原被剥离的 import 别名：`import pandas as pdd` 之后 pdd 依然可用
+    scope.update(alias)
 
     # 整段代码只有一个表达式时按 eval 执行，否则按 exec 执行（取 out 变量）
     single_expr = len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr)
@@ -495,6 +541,17 @@ def _run_code(ctx: ToolContext, code: str) -> Any:
                 result = scope.get("out", "（代码已执行，无 out 变量）")
     except ToolError:
         raise
+    except KeyError as exc:
+        # 补上下文：模型十有八九是拿了别张表的列名
+        raise ToolError(
+            f"KeyError: {exc}｜当前表「{ctx.active_sheet}」的列名为 {list(df.columns)}。"
+            "若列名不存在，请先核对输出首行的「当前 df」是否是你要分析的那张表。"
+        ) from exc
+    except AttributeError as exc:
+        raise ToolError(
+            f"AttributeError: {exc}｜当前表「{ctx.active_sheet}」的列名为 {list(df.columns)}。"
+            "中文列名请用 df['列名'] 访问，不要用点号。"
+        ) from exc
     except Exception as exc:
         raise ToolError(f"{type(exc).__name__}: {exc}") from exc
 
@@ -507,9 +564,9 @@ def _run_code(ctx: ToolContext, code: str) -> Any:
 @tool(
     name="run_pandas",
     description=(
-        "在沙箱内执行 pandas 代码（兜底万能工具）。可用变量: df(当前工作表 DataFrame)、"
-        "pd、np、sheet。支持表达式或语句；语句形式请把结果赋给 out 变量。"
-        "禁止 import、文件/网络操作。"
+        "在沙箱内执行 pandas 代码（兜底万能工具）。可用变量: df、columns、pd、np、sheet。"
+        "df 就是输出首行「当前 df」所指的那张表；要分析别的表请显式传 sheet 参数，"
+        "不要假设 df 一直是你上次体检的那张。支持表达式或语句，语句形式把结果赋给 out。"
     ),
     parameters={
         "type": "object",
@@ -517,10 +574,15 @@ def _run_code(ctx: ToolContext, code: str) -> Any:
             "code": {
                 "type": "string",
                 "description": "要执行的 pandas 代码，例如 df.groupby('地区')['销售额'].sum()",
-            }
+            },
+            "sheet": {
+                "type": "string",
+                "description": "可选，指定要分析的工作表名；省略则用当前工作表",
+            },
         },
         "required": ["code"],
     },
+    uses_active_frame=True,
 )
-def run_pandas(ctx: ToolContext, code: str) -> Any:
-    return _run_code(ctx, code)
+def run_pandas(ctx: ToolContext, code: str, sheet: str | None = None) -> Any:
+    return _run_code(ctx, code, sheet)
