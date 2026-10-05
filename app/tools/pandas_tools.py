@@ -449,6 +449,30 @@ _SAFE_BUILTINS = {
 
 _PRELOADED = {"pandas": pd, "numpy": np}
 
+# pandas / numpy 自带的文件 I/O 入口。沙箱只应 operate 在已加载的 df 上，
+# 一旦放开这些，模型就能读取服务器上任意 xlsx/csv —— 即使我们不给它路径。
+# 规则故意「宁可错杀」：宁可少一个工具，也不能让沙箱碰到文件系统。
+_IO_ATTR_PREFIXES = ("read_",)
+_IO_ATTRS = frozenset({
+    # 命名空间与其他读入口
+    "io", "clipboard", "codecs",
+    # pandas 写盘
+    "to_csv", "to_excel", "to_json", "to_parquet", "to_pickle", "to_sql",
+    "to_hdf", "to_stata", "to_feather", "to_orc", "to_html", "to_xml",
+    "to_latex", "to_clipboard",
+    # numpy 文件 I/O
+    "load", "save", "savez", "savez_compressed", "loadtxt", "genfromtxt",
+    "fromfile", "tofile", "memmap",
+})
+# 纯计算型转换，必须放行（to_numeric / to_datetime / to_timedelta）
+_ALLOWED_TO_ATTRS = frozenset({"to_numeric", "to_datetime", "to_timedelta", "to_dict", "to_numpy"})
+
+
+def _is_forbidden_io_attr(name: str) -> bool:
+    if name in _ALLOWED_TO_ATTRS:
+        return False
+    return name in _IO_ATTRS or name.startswith(_IO_ATTR_PREFIXES)
+
 
 def _strip_preloaded_imports(tree: ast.Module) -> dict[str, Any]:
     """移除 `import pandas as pd` 这类已被预置的导入。
@@ -505,6 +529,14 @@ def _validate_code(code: str) -> tuple[ast.Module, dict[str, Any]]:
                 raise ToolError("禁止访问解释器内部属性。")
             if any(part.startswith("__") for part in parts):
                 raise ToolError("禁止访问以下划线开头的属性。")
+            io_attr = next(
+                (part for part in parts if _is_forbidden_io_attr(part)), None
+            )
+            if io_attr is not None:
+                raise ToolError(
+                    f"禁止在沙箱中访问文件系统（{io_attr} 已禁用）。"
+                    "请只使用已加载的 df 做分析；换数据请用 load_sheet 切换工作表。"
+                )
     return tree, alias
 
 

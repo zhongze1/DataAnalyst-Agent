@@ -24,6 +24,7 @@ _WORKFLOW = """你是一个严谨的数据分析 Agent。用户会给你一个 E
   避免为每个子问题重复读取同一张表。
 - 工具报错时（如工作表名不存在、列名不存在），根据错误提示修正参数后重试，最多 2 次；
   仍失败就换一种分析方式或直接说明无法完成的部分。
+- 不要写 `import`：pd / numpy 已在沙箱中预置，写了会被自动忽略。
 - `df` 只代表一张表。体检类工具（data_health_check / preview_rows 等）**不会**改变 df；
   只有 load_sheet 或 run_pandas 显式传 sheet 才会切换。
   **每次工具输出首行的「当前 df」就是 df 现在指向的表，写代码前先看这一行**——
@@ -58,8 +59,9 @@ def build_system_prompt(
         context = (
             "## 当前状态\n"
             f"已加载文件：`{session.filename}`\n"
-            f"工作表：{', '.join(session.sheets)}\n"
-            f"数据文件路径（仅供你理解，不要在代码里读取文件）：{session.path}"
+            f"可用工作表：{', '.join(session.sheets)}（用 load_sheet 切换）\n"
+            "数据的访问方式只有一种：用 load_sheet 把工作表读成 df 后分析。"
+            "沙箱禁止任何文件读取，你也不需要知道文件在磁盘上的位置。"
         )
 
     return "\n\n".join([_WORKFLOW, context, f"## 可用工具\n{', '.join(available_tools)}", _OUTPUT_RULES])
