@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.agent.loop
+import app.audit
 import app.config
 import app.dependencies
 import app.main
@@ -43,6 +44,7 @@ def settings(tmp_path: Path) -> Settings:
         _env_file=None,
         llm_provider="mock",
         upload_dir=tmp_path / "uploads",
+        audit_dir=tmp_path / "audit",
         max_agent_steps=6,
         max_tool_output_chars=2000,
         max_upload_bytes=10 * 1024 * 1024,
@@ -59,6 +61,7 @@ def isolate_settings(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Ite
     for module in (
         app.config,
         app.main,
+        app.audit,
         app.tools.base,
         app.storage.session_store,
         app.agent.loop,
@@ -85,6 +88,16 @@ def enable_info_logging() -> Iterator[None]:
     finally:
         root.setLevel(original_level)
         root.handlers = original_handlers
+
+
+@pytest.fixture(autouse=True)
+def isolated_audit():
+    """审计 logger 是模块级单例，必须逐用例重置，否则会跨用例写同一个文件。"""
+    app.audit._audit = None
+    try:
+        yield
+    finally:
+        app.audit._audit = None
 
 
 # --------------------------------------------------------------------- 数据

@@ -6,6 +6,7 @@ import logging
 import time
 from typing import Any, Callable
 
+from app.audit import record_tool_call
 from app.logging_setup import describe_arguments
 from app.tools.base import encode_tool_error
 from app.tools.base import Tool, ToolContext, ToolError
@@ -66,6 +67,13 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             logger.warning("工具不存在: %s", name)
+            record_tool_call(
+                tool=name,
+                arguments=arguments,
+                ok=False,
+                duration_ms=0.0,
+                error_code="UNKNOWN_TOOL",
+            )
             return False, encode_tool_error(
                 "UNKNOWN_TOOL",
                 f"工具不存在: {name}。可用工具: {', '.join(self.names())}",
@@ -80,14 +88,35 @@ class ToolRegistry:
                 describe_arguments(arguments or {}),
                 exc,
             )
+            record_tool_call(
+                tool=name,
+                arguments=arguments,
+                ok=False,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error_code=exc.code,
+            )
             return False, encode_tool_error(exc.code, str(exc))
         except Exception as exc:  # pragma: no cover - 兜底，防止工具把整个 Loop 打断
             logger.exception("工具未预期异常 %s", name)
+            record_tool_call(
+                tool=name,
+                arguments=arguments,
+                ok=False,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error_code="RUNTIME_ERROR",
+            )
             return False, encode_tool_error(
                 "RUNTIME_ERROR", f"{type(exc).__name__}: {exc}"
             )
         else:
             duration_ms = round((time.perf_counter() - started) * 1000, 1)
+            record_tool_call(
+                tool=name,
+                arguments=arguments,
+                ok=True,
+                duration_ms=duration_ms,
+                result_chars=len(result),
+            )
             logger.info(
                 "工具完成 %s(%s) | %.1fms | 结果 %d 字符",
                 name,

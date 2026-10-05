@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     # 关闭时只打 ERROR 日志，服务照常启动，便于临时带着问题调试
     strict_config: bool = True
 
+    # ---- 审计 ----
+    # 工具调用审计（JSONL），与日志分开：日志给运维看，审计给合规看
+    audit_dir: Path = DATA_DIR / "audit"
+    audit_enabled: bool = True
+
     # ---- 日志 ----
     # text = 人类可读；json = 结构化，供日志系统采集聚合
     log_format: Literal["text", "json"] = "text"
