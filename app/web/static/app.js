@@ -168,7 +168,8 @@ function renderSteps(steps) {
     const status = s.ok
       ? `<span class="step-status ok">成功</span>`
       : `<span class="step-status bad">失败</span>`;
-    const body = escapeHtml(s.ok ? s.result : s.error || "");
+    // 失败时只显示人话提示；原始错误在服务端日志里
+    const body = escapeHtml(s.ok ? s.result : s.error || "工具执行失败");
     return `<div class="step ${s.ok ? "" : "fail"}">
       <div class="step-head">
         <span class="step-no">#${s.step}</span>

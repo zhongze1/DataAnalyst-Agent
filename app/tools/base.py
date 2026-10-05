@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -19,7 +20,14 @@ class ToolError(Exception):
 
     注意：这类异常**不会中断 Agent Loop**，错误信息会作为工具结果回传给模型，
     让模型自行纠正（例如 sheet 名写错时改用 list_sheets 重新选择）。
+
+    ``code`` 是错误分类。原始 message 只给模型（它需要细节才能自纠），
+    用户看到的是 :func:`humanize_tool_error` 映射出的人话。
     """
+
+    def __init__(self, message: str, *, code: str = "TOOL_ERROR") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -53,11 +61,12 @@ class ToolContext:
 
         name = sheet or self.active_sheet or (self.sheets[0] if self.sheets else None)
         if not name:
-            raise ToolError("尚未加载任何数据，请先调用 load_sheet。")
+            raise ToolError("尚未加载任何数据，请先调用 load_sheet。", code="NO_DATA_LOADED")
         if name not in self.frames:
             if self.sheets and name not in self.sheets:
                 raise ToolError(
-                    f"工作表 {name!r} 不存在。可用工作表: {', '.join(self.sheets) or '无'}"
+                    f"工作表 {name!r} 不存在。可用工作表: {', '.join(self.sheets) or '无'}",
+                    code="SHEET_NOT_FOUND",
                 )
             self.frames[name] = SessionStore.read_frame(self.file_path, name)
         # 首次使用时初始化是必要的（否则模型无从知道 df 是哪张表）；
@@ -141,6 +150,44 @@ class Tool:
                 raise ToolError(f"参数 {key} 应为字符串，收到 {type(value).__name__}")
             if expected == "integer" and isinstance(value, bool):
                 raise ToolError(f"参数 {key} 应为整数")
+
+
+# ----------------------------------------------------------------- 错误双通路
+# 工具失败时，模型收到带细节的原始错误（能自我纠正），
+# 用户收到这里映射出的人话（看得懂、能行动）。原始错误只进日志。
+_USER_HINTS: dict[str, str] = {
+    "SHEET_NOT_FOUND": "数据里没有这个工作表。换一个表名，或先用「工作表列表」看看有哪些表。",
+    "COLUMN_NOT_FOUND": "数据里没有这个列名。请对照「列画像」里的实际列名后再试。",
+    "COLUMN_MISSING": "代码里引用的列在当前表中不存在。请看工具输出首行的「当前 df」与列名清单。",
+    "NO_COLUMNS": "没有指定任何列，无法分析。",
+    "NO_DATA_LOADED": "还没有加载数据。请先上传 Excel 文件。",
+    "SANDBOX_VIOLATION": "生成的代码触及安全限制（不能读写文件），已阻止执行。",
+    "CODE_TOO_LONG": "生成的代码太长，请拆成几步分别计算。",
+    "SYNTAX_ERROR": "生成的代码有语法错误，请检查括号与引号是否配对。",
+    "UNKNOWN_TOOL": "请求了一个不存在的工具。",
+    "RUNTIME_ERROR": "这一步计算出错了。可以换个问法或补充说明后重试。",
+    "TOOL_ERROR": "这一步没能完成。可以换个问法或补充说明后重试。",
+}
+
+_ERROR_PREFIX = re.compile(r"^\[([A-Z_]+)\]\s*(.*)$", re.DOTALL)
+
+
+def encode_tool_error(code: str, detail: str) -> str:
+    """给工具错误加机器可读前缀。模型看到无伤（多一个分类标签）。"""
+    return f"[{code}] {detail}"
+
+
+def split_tool_error(text: str) -> tuple[str, str]:
+    """把 ``[CODE] detail`` 拆回 (code, detail)；不是该格式则原样归类。"""
+    match = _ERROR_PREFIX.match(text)
+    if match:
+        return match.group(1), match.group(2)
+    return "TOOL_ERROR", text
+
+
+def humanize_tool_error(code: str) -> str:
+    """内部错误码 -> 面向用户的中文提示。"""
+    return _USER_HINTS.get(code, _USER_HINTS["TOOL_ERROR"])
 
 
 def format_value(value: Any) -> str:

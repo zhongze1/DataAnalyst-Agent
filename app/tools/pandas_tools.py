@@ -154,10 +154,13 @@ def data_health_check(
     if columns is not None:
         missing = [c for c in columns if c not in df.columns]
         if missing:
-            raise ToolError(f"列 {missing} 不存在。可用列: {list(df.columns)}")
+            raise ToolError(
+                f"列 {missing} 不存在。可用列: {list(df.columns)}",
+                code="COLUMN_NOT_FOUND",
+            )
         df = df[list(columns)]
     if df.shape[1] == 0:
-        raise ToolError("没有可体检的列。")
+        raise ToolError("没有可体检的列。", code="NO_COLUMNS")
 
     total_rows, total_cols = df.shape
     limit = max(1, min(int(max_columns or 40), 200))
@@ -300,7 +303,10 @@ def column_profile(ctx: ToolContext, sheet: str | None = None, column: str | Non
     df = ctx.get_frame(sheet)  # 只读：不切换当前工作表
     if column:
         if column not in df.columns:
-            raise ToolError(f"列 {column!r} 不存在。可用列: {list(df.columns)}")
+            raise ToolError(
+                f"列 {column!r} 不存在。可用列: {list(df.columns)}",
+                code="COLUMN_NOT_FOUND",
+            )
         df = df[[column]]
 
     records: list[dict[str, Any]] = []
@@ -349,7 +355,10 @@ def value_counts(
 ) -> str:
     df = ctx.get_frame(sheet)  # 只读：不切换当前工作表
     if column not in df.columns:
-        raise ToolError(f"列 {column!r} 不存在。可用列: {list(df.columns)}")
+        raise ToolError(
+            f"列 {column!r} 不存在。可用列: {list(df.columns)}",
+            code="COLUMN_NOT_FOUND",
+        )
     counts = df[column].value_counts(dropna=False).head(max(1, min(int(top or 10), 50)))
     return f"[{column} 取值分布 · 共 {len(df)} 行]\n{counts.to_string()}"
 
@@ -488,7 +497,8 @@ def _strip_preloaded_imports(tree: ast.Module) -> dict[str, Any]:
                 root = item.name.split(".")[0]
                 if root not in _PRELOADED:
                     raise ToolError(
-                        f"禁止 import {item.name}，沙箱只提供 pandas / numpy。"
+                        f"禁止 import {item.name}，沙箱只提供 pandas / numpy。",
+                        code="SANDBOX_VIOLATION",
                     )
                 if item.asname:
                     alias[item.asname] = _PRELOADED[root]
@@ -505,20 +515,27 @@ def _validate_code(code: str) -> tuple[ast.Module, dict[str, Any]]:
     """
     limit = get_settings().max_sandbox_code_lines
     if len([ln for ln in code.splitlines() if ln.strip()]) > limit:
-        raise ToolError(f"代码过长（超过 {limit} 行），请拆成多次调用。")
+        raise ToolError(
+            f"代码过长（超过 {limit} 行），请拆成多次调用。", code="CODE_TOO_LONG"
+        )
 
     try:
         tree = ast.parse(code, mode="exec")
     except SyntaxError as exc:
-        raise ToolError(f"代码语法错误: 第 {exc.lineno} 行 {exc.msg}") from exc
+        raise ToolError(
+            f"代码语法错误: 第 {exc.lineno} 行 {exc.msg}", code="SYNTAX_ERROR"
+        ) from exc
 
     alias = _strip_preloaded_imports(tree)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            raise ToolError("禁止 from ... import，请直接使用已提供的 pd / np / df。")
+            raise ToolError(
+                "禁止 from ... import，请直接使用已提供的 pd / np / df。",
+                code="SANDBOX_VIOLATION",
+            )
         if isinstance(node, ast.Name) and node.id in _BANNED_NAMES:
-            raise ToolError(f"禁止使用 {node.id}()。")
+            raise ToolError(f"禁止使用 {node.id}()。", code="SANDBOX_VIOLATION")
         if isinstance(node, ast.Attribute):
             parts: list[str] = []
             current: ast.AST = node
@@ -526,16 +543,17 @@ def _validate_code(code: str) -> tuple[ast.Module, dict[str, Any]]:
                 parts.append(current.attr)
                 current = current.value
             if isinstance(current, ast.Name) and current.id in {"__builtins__", "__import__"}:
-                raise ToolError("禁止访问解释器内部属性。")
+                raise ToolError("禁止访问解释器内部属性。", code="SANDBOX_VIOLATION")
             if any(part.startswith("__") for part in parts):
-                raise ToolError("禁止访问以下划线开头的属性。")
+                raise ToolError("禁止访问以下划线开头的属性。", code="SANDBOX_VIOLATION")
             io_attr = next(
                 (part for part in parts if _is_forbidden_io_attr(part)), None
             )
             if io_attr is not None:
                 raise ToolError(
                     f"禁止在沙箱中访问文件系统（{io_attr} 已禁用）。"
-                    "请只使用已加载的 df 做分析；换数据请用 load_sheet 切换工作表。"
+                    "请只使用已加载的 df 做分析；换数据请用 load_sheet 切换工作表。",
+                    code="SANDBOX_VIOLATION",
                 )
     return tree, alias
 
@@ -577,12 +595,14 @@ def _run_code(ctx: ToolContext, code: str, sheet: str | None = None) -> Any:
         # 补上下文：模型十有八九是拿了别张表的列名
         raise ToolError(
             f"KeyError: {exc}｜当前表「{ctx.active_sheet}」的列名为 {list(df.columns)}。"
-            "若列名不存在，请先核对输出首行的「当前 df」是否是你要分析的那张表。"
+            "若列名不存在，请先核对输出首行的「当前 df」是否是你要分析的那张表。",
+            code="COLUMN_MISSING",
         ) from exc
     except AttributeError as exc:
         raise ToolError(
             f"AttributeError: {exc}｜当前表「{ctx.active_sheet}」的列名为 {list(df.columns)}。"
-            "中文列名请用 df['列名'] 访问，不要用点号。"
+            "中文列名请用 df['列名'] 访问，不要用点号。",
+            code="COLUMN_MISSING",
         ) from exc
     except Exception as exc:
         raise ToolError(f"{type(exc).__name__}: {exc}") from exc

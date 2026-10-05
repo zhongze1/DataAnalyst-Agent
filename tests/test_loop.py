@@ -40,7 +40,9 @@ async def test_tool_failure_does_not_break_loop(make_agent, session) -> None:
     assert result.stop_reason == "final"
     assert len(result.steps) == 1
     assert result.steps[0].ok is False
-    assert "不存在" in (result.steps[0].error or "")
+    # 面向用户的是脱敏后的人话（DA-007）
+    assert "没有这个工作表" in (result.steps[0].error or "")
+    assert "不存在的工作表" not in (result.steps[0].error or "")
     assert result.answer == "已根据实际可用信息给出结论。"
 
 

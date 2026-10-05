@@ -135,8 +135,11 @@ def test_chat_survives_tool_failure(make_client, session) -> None:
     assert [s["tool"] for s in body["steps"]] == ["load_sheet"]
     failed = body["steps"][0]
     assert failed["ok"] is False
-    assert "不存在" in failed["error"]
-    # 模型拿到错误后自行修正并给出结论
+    # 双通路（DA-007）：用户看到人话，模型的原始错误细节不出接口
+    assert "没有这个工作表" in failed["error"]
+    assert "不存在的工作表" not in failed["error"]
+    assert "Traceback" not in failed["error"]
+    # 模型拿到原始错误后自行修正并给出结论
     assert body["stop_reason"] == "final"
     assert body["answer"] == "已根据实际可用信息给出结论。"
 

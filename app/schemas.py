@@ -37,6 +37,7 @@ class ToolStep(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     ok: bool = True
     result: str = ""
+    # 面向用户的中文提示（已脱敏）。原始错误只给模型与日志，不出接口。
     error: str | None = None
 
 

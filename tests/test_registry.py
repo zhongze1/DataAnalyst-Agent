@@ -37,8 +37,9 @@ def test_business_error_is_captured(registry, ctx: ToolContext) -> None:
     """ToolError 应被转成可纠正的提示，而不是抛出去。"""
     ok, text = registry.run("load_sheet", {"sheet": "不存在的工作表"}, ctx)
     assert ok is False
-    assert text.startswith("[ToolError]")
-    assert "可用工作表" in text  # 错误信息要含纠错所需信息
+    # 带机器可读错误码前缀，供上层分流（DA-007）
+    assert text.startswith("[SHEET_NOT_FOUND]")
+    assert "可用工作表" in text  # 模型侧仍保留纠错所需细节
 
 
 def test_unexpected_exception_is_contained() -> None:
@@ -53,7 +54,7 @@ def test_unexpected_exception_is_contained() -> None:
     )
     ok, text = local.run("boom", {}, ToolContext(session_id="t"))
     assert ok is False
-    assert "[RuntimeError]" in text
+    assert text.startswith("[RUNTIME_ERROR]")
     assert "ValueError" in text
 
 

@@ -29,7 +29,7 @@ from app.agent.prompts import build_system_prompt
 from app.config import Settings, get_settings
 from app.llm.base import LLMClient, LLMError
 from app.storage.session_store import Session
-from app.tools.base import ToolContext
+from app.tools.base import ToolContext, humanize_tool_error, split_tool_error
 from app.tools.registry import ToolRegistry, registry
 
 logger = logging.getLogger(__name__)
@@ -149,6 +149,17 @@ class DataAnalystAgent:
                 ok, output = await asyncio.to_thread(
                     self._tools.run, call.name, call.arguments, ctx
                 )
+                # 双通路：模型拿到带细节的原始错误（能自纠），用户拿���人话。
+                # 原始错误只在这里落日志，不再进 HTTP 响应。
+                error_text: str | None = None
+                if not ok:
+                    code, _raw = split_tool_error(output)
+                    error_text = humanize_tool_error(code)
+                    logger.info(
+                        "工具失败已转为人话 | tool=%s | code=%s",
+                        call.name,
+                        code,
+                    )
                 steps.append(
                     ToolStep(
                         step=len(steps) + 1,
@@ -156,7 +167,7 @@ class DataAnalystAgent:
                         arguments=call.arguments,
                         ok=ok,
                         result=output,
-                        error=None if ok else output,
+                        error=error_text,
                     )
                 )
                 working.append(

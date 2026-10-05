@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable
 
 from app.logging_setup import describe_arguments
+from app.tools.base import encode_tool_error
 from app.tools.base import Tool, ToolContext, ToolError
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,10 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             logger.warning("工具不存在: %s", name)
-            return False, f"工具不存在: {name}。可用工具: {', '.join(self.names())}"
+            return False, encode_tool_error(
+                "UNKNOWN_TOOL",
+                f"工具不存在: {name}。可用工具: {', '.join(self.names())}",
+            )
         started = time.perf_counter()
         try:
             result = tool.run(ctx, arguments)
@@ -76,10 +80,12 @@ class ToolRegistry:
                 describe_arguments(arguments or {}),
                 exc,
             )
-            return False, f"[ToolError] {exc}"
+            return False, encode_tool_error(exc.code, str(exc))
         except Exception as exc:  # pragma: no cover - 兜底，防止工具把整个 Loop 打断
             logger.exception("工具未预期异常 %s", name)
-            return False, f"[RuntimeError] {type(exc).__name__}: {exc}"
+            return False, encode_tool_error(
+                "RUNTIME_ERROR", f"{type(exc).__name__}: {exc}"
+            )
         else:
             duration_ms = round((time.perf_counter() - started) * 1000, 1)
             logger.info(
