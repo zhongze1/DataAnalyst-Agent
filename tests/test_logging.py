@@ -17,7 +17,12 @@ from app.context import (
     session_id_var,
     set_session_id,
 )
-from app.logging_setup import JsonFormatter, TextFormatter, describe_arguments
+from app.logging_setup import (
+    JsonFormatter,
+    TextFormatter,
+    describe_arguments,
+    short_hash,
+)
 from app.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
 
 
@@ -110,7 +115,7 @@ def test_text_formatter_omits_placeholder_without_request_id() -> None:
 
 # ================================================================ 参数脱敏
 def test_describe_arguments_does_not_leak_content() -> None:
-    """工具参数可能含客户名/手机号/整段代码，日志只能记形状。"""
+    """工具参数可能含客户名/手机号/整段代码，日志只能记形状 + 指纹。"""
     described = describe_arguments({
         "code": "df[df['手机号'] == '13800138000']",
         "sheet": "客户明细",
@@ -118,10 +123,36 @@ def test_describe_arguments_does_not_leak_content() -> None:
     })
     assert "13800138000" not in described
     assert "客户明细" not in described
-    # 只记「名称(类型,规模)」，规模随内容长度变化，不写死具体数字
+    # 只记「名称(类型,长度,指纹)」，长度随内容变化，不写死具体数字
     assert "code(str," in described
-    assert "sheet(str,4)" in described
+    assert "sheet(str,4," in described
     assert "top(int)" in described
+
+
+def test_describe_arguments_includes_short_hash() -> None:
+    """DA-009 方案 B：记录内容指纹，使「两次调用参数是否相同」可被追查。"""
+    described = describe_arguments({"sheet": "销售明细"})
+    assert described == f"sheet(str,4,#{short_hash('销售明细')})"
+    # 同名同参 → 指纹相同
+    assert describe_arguments({"sheet": "销售明细"}) == described
+    # 内容不同 → 指纹不同
+    assert describe_arguments({"sheet": "库存快照"}) != described
+
+
+def test_short_hash_is_stable_and_short() -> None:
+    a = short_hash("张三")
+    assert a == short_hash("张三")
+    assert a != short_hash("李四")
+    assert len(a) == 8
+    assert all(char in "0123456789abcdef" for char in a)
+
+
+def test_hash_cannot_reveal_short_values() -> None:
+    """指纹是单向的：知道长度+指纹也无法反推出原文（彩虹表不在防护范围内，
+    但足以避免日志被直接读到业务数据）。"""
+    import hashlib
+
+    assert short_hash("abc") == hashlib.sha256(b"abc").hexdigest()[:8]
 
 
 def test_describe_arguments_handles_containers_and_empty() -> None:

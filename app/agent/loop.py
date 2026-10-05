@@ -34,6 +34,77 @@ from app.tools.registry import ToolRegistry, registry
 
 logger = logging.getLogger(__name__)
 
+# 任务漂移告警阈值：工具调用次数超过此值，且最终答案里找不到提问的任何一个词，
+# 说明模型很可能在答别的问题。只告警不阻断。
+_DRIFT_STEP_THRESHOLD = 8
+_TOKEN_MIN_LEN = 2
+
+
+def _is_cjk(char: str) -> bool:
+    """是否为汉字。
+
+    不能简单用「码位 >= 0x2E80」：那会把全角标点（？！，U+FF00–U+FFEF）
+    和 CJK 标点（U+3000–U+303F）也算进来，产出「？？」这类无意义候选词。
+    这里只认 CJK 统一表意文字与扩展 A。
+    """
+    code = ord(char)
+    return 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF
+
+
+def _question_tokens(question: str) -> list[str]:
+    """从提问里抽出可用于比对的候选片段。
+
+    中文没有空格，无法按空白切词（整句会被当成一个 token，提取不出「张三」）。
+    因此中文走 **2 字滑窗**：一个 11 字的问题能得到 10 个候选片段，
+    只要答案里出现其中任何一个，就认为回答触及了问题。
+    代价是可能误报（答案里偶然出现「一下」这类片段）—— 所以只写日志不阻断。
+    """
+    tokens: list[str] = []
+    ascii_buf: list[str] = []
+    cjk_buf: list[str] = []
+
+    def flush_ascii() -> None:
+        if len(ascii_buf) >= _TOKEN_MIN_LEN:
+            tokens.append("".join(ascii_buf))
+        ascii_buf.clear()
+
+    def flush_cjk() -> None:
+        for i in range(len(cjk_buf) - _TOKEN_MIN_LEN + 1):
+            tokens.append("".join(cjk_buf[i : i + _TOKEN_MIN_LEN]))
+        cjk_buf.clear()
+
+    for char in question:
+        if char.isascii() and (char.isalnum() or char == "_"):
+            flush_cjk()
+            ascii_buf.append(char)
+        elif _is_cjk(char):
+            flush_ascii()
+            cjk_buf.append(char)
+        else:
+            flush_ascii()
+            flush_cjk()
+    flush_ascii()
+    flush_cjk()
+    return tokens
+
+
+def detect_task_drift(question: str, answer: str, step_count: int) -> str | None:
+    """检测「答非所问」：返回告警描述，正常时返回 None。
+
+    这是观测手段，不是正确性保证 —— 关键词匹配会有误报，所以只写日志。
+    """
+    if step_count < _DRIFT_STEP_THRESHOLD:
+        return None
+    tokens = _question_tokens(question)
+    if not tokens:
+        return None
+    if any(token in answer for token in tokens):
+        return None
+    return (
+        f"疑似任务漂移：调用 {step_count} 次工具，但答案里没有出现提问中的任何一个词"
+        f"（关键词: {', '.join(tokens[:6])}）"
+    )
+
 
 @dataclass
 class ToolStep:
@@ -79,6 +150,7 @@ class DataAnalystAgent:
                     stop_reason="no_file",
                 ),
                 started,
+                question,
             )
 
         logger.info(
@@ -127,6 +199,7 @@ class DataAnalystAgent:
                         stop_reason="llm_error",
                     ),
                     started,
+                    question,
                 )
 
             usage = response.usage or usage
@@ -142,6 +215,7 @@ class DataAnalystAgent:
                         usage=usage,
                     ),
                     started,
+                    question,
                 )
 
             # 执行工具：pandas 是阻塞型 CPU 任务，放到线程池避免卡住事件循环
@@ -201,14 +275,19 @@ class DataAnalystAgent:
         return self._finish(
             AgentResult(answer=answer, steps=steps, stop_reason=stop_reason, usage=usage),
             started,
+            question,
         )
 
     # ------------------------------------------------------------------ 内部
     @staticmethod
-    def _finish(result: AgentResult, started: float) -> AgentResult:
+    def _finish(result: AgentResult, started: float, question: str = "") -> AgentResult:
         """统一的收尾出口：所有 return 都经过这里，保证一定留下耗时与用量日志。"""
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         failed = sum(1 for step in result.steps if not step.ok)
+        if question:
+            drift = detect_task_drift(question, result.answer, len(result.steps))
+            if drift:
+                logger.warning("任务漂移告警 | %s", drift, extra={"error_code": "TASK_DRIFT"})
         logger.info(
             "Agent Loop 结束 | 工具 %d 次(失败 %d) | 终止原因 %s | %.1fms",
             len(result.steps),

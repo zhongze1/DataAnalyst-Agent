@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sys
@@ -87,18 +88,27 @@ def setup_logging(fmt: str = "text", level: str = "INFO") -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-def describe_arguments(arguments: dict[str, Any]) -> str:
-    """把工具参数压成「名称(类型,规模)」，**丢弃内容**。
+def short_hash(text: str) -> str:
+    """字符串参数的内容指纹（SHA256 前 8 位）。
 
-    工具参数里可能有客户名、手机号，甚至整段 pandas 代码；日志只保留
-    排障必需的形状信息。字符串只记长度，数值只记类型。
+    用途：判断「两次调用的参数是否相同」——这是事后追查最常见的需求，
+    而读原文会泄露业务数据。8 位十六进制在单次会话的量级下足够区分。
+    """
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
+def describe_arguments(arguments: dict[str, Any]) -> str:
+    """把工具参数压成「名称(类型,规模,指纹)」，**丢弃内容**。
+
+    工具参数里可能有客户名、手机号，甚至整段 pandas 代码；日志与审计只保留
+    排障必需的形状信息：名称、类型、字符串长度、内容指纹。
     """
     if not arguments:
         return "-"
     parts: list[str] = []
     for key, value in arguments.items():
         if isinstance(value, str):
-            parts.append(f"{key}(str,{len(value)})")
+            parts.append(f"{key}(str,{len(value)},#{short_hash(value)})")
         elif isinstance(value, (list, tuple)):
             parts.append(f"{key}(list,{len(value)})")
         elif isinstance(value, dict):
