@@ -129,12 +129,53 @@ body {
 .step-head { display: flex; align-items: center; gap: 8px; }
 .step-no { color: #a6b0c2; font-variant-numeric: tabular-nums; }
 .step-name { font-family: Consolas, Monaco, monospace; color: var(--brand); font-weight: 600; }
-.step-args { color: var(--muted); font-family: Consolas, Monaco, monospace; font-size: 11px; }
+.step-status {
+  margin-left: auto; font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid transparent;
+}
+.step-status.ok { color: var(--ok); background: #eaf7f1; border-color: #c9ead9; }
+.step-status.bad { color: var(--err); background: #fdeeee; border-color: #f3cfcf; }
+
+/* 参数独立成行，可换行，不再与工具名挤在一条 flex 里 */
+.step-args { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.step-args .arg {
+  color: var(--muted); font-family: Consolas, Monaco, monospace; font-size: 11px;
+  word-break: break-all;
+}
+
+/* 代码块：等宽换行 + 限高，避免长代码撑破面板 */
+.step-code { margin-top: 6px; }
+.step-code summary {
+  cursor: pointer; font-size: 11px; color: var(--muted); list-style: none;
+  display: inline-flex; align-items: center; gap: 5px; user-select: none;
+}
+.step-code summary::-webkit-details-marker { display: none; }
+.step-code summary::before { content: "▸"; transition: transform .15s; }
+.step-code[open] summary::before { transform: rotate(90deg); }
+.step-code summary:hover { color: var(--brand); }
+.step-code pre {
+  margin-top: 5px; background: #0f1729; color: #c7d6ee; padding: 9px 11px;
+  border-radius: 8px; overflow: auto; max-height: 300px;
+  font-family: Consolas, Monaco, monospace; font-size: 11.5px; line-height: 1.6;
+  white-space: pre; tab-size: 4;
+}
+
 .step-body {
   margin-top: 6px; background: #0f1729; color: #c7d6ee; padding: 8px 10px; border-radius: 8px;
   white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto;
 }
 .step.fail .step-name { color: var(--err); }
+
+/* 答案里的代码块：默认折叠，结论优先 */
+.answer-code { margin: 8px 0; }
+.answer-code summary {
+  cursor: pointer; font-size: 11.5px; color: var(--muted);
+  display: inline-flex; align-items: center; gap: 5px; list-style: none;
+}
+.answer-code summary::-webkit-details-marker { display: none; }
+.answer-code summary::before { content: "▸"; transition: transform .15s; }
+.answer-code[open] summary::before { transform: rotate(90deg); }
+.answer-code summary:hover { color: var(--brand); }
 .thinking { color: var(--muted); font-size: 12.5px; font-style: italic; }
 
 /* ---------------- 输入区 ---------------- */

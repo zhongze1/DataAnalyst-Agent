@@ -66,7 +66,12 @@ function renderMarkdown(text) {
 
   const blocks = [];
   let html = escaped.replace(/```([\s\S]*?)```/g, (_, code) => {
-    blocks.push(`<pre><code>${code.replace(/^\n/, "")}</code></pre>`);
+    // 答案里的代码默认折叠：用户要的是结论，代码属于「想看才看」的内容。
+    // 实际调用的代码在下方「执行过程」面板里，那才是准确的一份。
+    blocks.push(
+      `<details class="answer-code"><summary>查看代码</summary>`
+      + `<pre><code>${code.replace(/^\n/, "")}</code></pre></details>`
+    );
     return `\u0000${blocks.length - 1}\u0000`;
   });
 
@@ -78,7 +83,10 @@ function renderMarkdown(text) {
     .replace(/`([^`\n]+)`/g, "<code>$1</code>")
     .split(/\n{2,}/)
     .map((block) => {
-      if (block.startsWith("\u0000") || block.includes("\u0000")) return null;
+      // 代码块已被替换成 \u0000N\u0000 占位符：原样保留，交给末尾统一还原。
+      // 早前这里返回 null 会把占位符连同代码块一起丢掉，导致答案里的代码块
+      // 根本不显示，且没有任何报错。
+      if (block.includes("\u0000")) return block;
       const lines = block.split("\n");
       if (lines[0].trim().startsWith("|") && lines.length > 1) {
         const cells = (row) => row.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
@@ -123,22 +131,58 @@ function addError(text) {
   return addMessage("assistant", `<p class="err">⚠ ${text}</p>`);
 }
 
+/* 代码类参数：单独渲染成代码块，不与工具名挤在同一行 */
+const CODE_ARGS = new Set(["code"]);
+/* 短于此行数则默认展开 —— 常见的一行表达式不该再点一次 */
+const AUTO_EXPAND_LINES = 4;
+
+function formatArgValue(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return `[${value.join(", ")}]`;
+  return JSON.stringify(value);
+}
+
+function renderStepArgs(args) {
+  const entries = Object.entries(args || {});
+  const brief = entries
+    .filter(([k]) => !CODE_ARGS.has(k))
+    .map(([k, v]) => `<span class="arg">${escapeHtml(k)}=${escapeHtml(formatArgValue(v))}</span>`);
+
+  const code = entries.find(([k]) => CODE_ARGS.has(k));
+  if (!code) return brief.length ? `<div class="step-args">${brief.join("")}</div>` : "";
+
+  const source = String(code[1] ?? "");
+  const lineCount = source.split("\n").length;
+  const open = lineCount <= AUTO_EXPAND_LINES ? " open" : "";
+  return `<div class="step-args">${brief.join("")}</div>`
+    + `<details class="step-code"${open}>`
+    + `<summary>计算代码（${lineCount} 行）</summary>`
+    + `<pre>${escapeHtml(source)}</pre>`
+    + `</details>`;
+}
+
 function renderSteps(steps) {
   if (!steps?.length) return "";
+  const failed = steps.filter((s) => !s.ok).length;
   const items = steps.map((s) => {
-    const args = Object.entries(s.arguments || {})
-      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
-      .join(", ");
+    const status = s.ok
+      ? `<span class="step-status ok">成功</span>`
+      : `<span class="step-status bad">失败</span>`;
+    const body = escapeHtml(s.ok ? s.result : s.error || "");
     return `<div class="step ${s.ok ? "" : "fail"}">
       <div class="step-head">
         <span class="step-no">#${s.step}</span>
-        <span class="step-name">${s.tool}</span>
-        <span class="step-args">${args || "无参数"}</span>
+        <span class="step-name">${escapeHtml(s.tool)}</span>
+        ${status}
       </div>
-      <div class="step-body">${(s.ok ? s.result : s.error || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</div>
+      ${renderStepArgs(s.arguments)}
+      <div class="step-body">${body}</div>
     </div>`;
   }).join("");
-  return `<details class="steps"><summary>执行过程 · 共 ${steps.length} 次工具调用</summary>${items}</details>`;
+  const summary = failed
+    ? `执行过程 · ${steps.length} 次工具调用（${failed} 次失败）`
+    : `执行过程 · ${steps.length} 次工具调用`;
+  return `<details class="steps"><summary>${summary}</summary>${items}</details>`;
 }
 
 /* ---------------------------------------------------------------- 上传 */
