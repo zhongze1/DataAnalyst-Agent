@@ -1,6 +1,7 @@
 /* 前端逻辑：文件上传 + 对话 + 工具调用轨迹渲染。原生 JS，无构建步骤。 */
 
 const state = {
+  controller: null,
   sessionId: null,
   sheets: [],
   busy: false,
@@ -20,6 +21,7 @@ const dom = {
   composer: el("composer"),
   input: el("input"),
   sendBtn: el("sendBtn"),
+  stopBtn: el("stopBtn"),
   resetBtn: el("resetBtn"),
 };
 
@@ -216,39 +218,215 @@ async function uploadFile(file) {
   }
 }
 
+/* ---------------------------------------------------------------- 流式 SSE
+ *
+ * 帧格式：event: <kind>\ndata: <json>\n\n
+ * 事件类型：start / tool_args / step / token / done / error
+ */
+function createSSEParser(onEvent) {
+  let buffer = "";
+  function handleFrame(frame) {
+    if (!frame.trim()) return;
+    let kind = "message";
+    const dataLines = [];
+    for (const line of frame.split(/\r?\n/)) {
+      if (line.startsWith("event:")) kind = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+    }
+    if (!dataLines.length) return;
+    try {
+      onEvent(kind, JSON.parse(dataLines.join("\n")));
+    } catch (err) {
+      console.warn("SSE 帧解析失败", frame, err);
+    }
+  }
+  return {
+    push(chunk) {
+      buffer += chunk;
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() ?? "";
+      frames.forEach(handleFrame);
+    },
+    // 流结束时冲刷缓冲区里可能残留的最后一帧
+    flush() {
+      if (buffer.trim()) handleFrame(buffer);
+      buffer = "";
+    },
+  };
+}
+
+async function streamChat(question, sessionId, { onEvent, signal } = {}) {
+  const response = await fetch("/api/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, message: question }),
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    // 流开始前就失败（会话不存在等）：解析统一错误体
+    const text = await response.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+    const error = new Error(
+      data?.error?.message || data?.detail || `请求失败 (${response.status})`
+    );
+    error.requestId = data?.error?.request_id || response.headers.get("X-Request-ID");
+    throw error;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  const parser = createSSEParser(onEvent);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.push(decoder.decode(value, { stream: true }));
+    }
+    const tail = decoder.decode();
+    if (tail) parser.push(tail);
+    parser.flush();
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
 /* ---------------------------------------------------------------- 提问 */
+function renderLiveStep(payload) {
+  return `<div class="step live" data-step="${payload.step}">
+    <div class="step-head">
+      <span class="step-no">#${payload.step}</span>
+      <span class="step-name">${escapeHtml(payload.tool)}</span>
+      <span class="step-status run">执行中</span>
+    </div>
+    ${payload.args_summary ? `<div class="step-args"><span class="arg">${escapeHtml(payload.args_summary)}</span></div>` : ""}
+  </div>`;
+}
+
+function markLiveStep(payload) {
+  const row = document.querySelector(`.step.live[data-step="${payload.step}"]`);
+  if (!row) return;
+  row.classList.remove("live");
+  const badge = row.querySelector(".step-status");
+  badge.textContent = payload.ok ? "成功" : "失败";
+  badge.className = `step-status ${payload.ok ? "ok" : "bad"}`;
+  if (payload.duration_ms != null) {
+    row.querySelector(".step-args")?.insertAdjacentHTML(
+      "beforeend",
+      `<span class="arg meta">${payload.duration_ms}ms</span>`
+    );
+  }
+}
+
 async function send(question) {
   if (state.busy || !question.trim()) return;
   addMessage("user", renderMarkdown(question));
   setBusy(true);
-  const thinking = addMessage("assistant", `<span class="thinking">正在分析数据…</span>`);
+
+  const controller = new AbortController();
+  state.controller = controller;
+
+  // 气泡立刻出现，边收事件边往里填 —— 用户全程看得到进展
+  const bubble = addMessage("assistant", "");
+  const status = document.createElement("div");
+  status.className = "stream-status";
+  status.textContent = "正在分析…";
+  const stepBox = document.createElement("div");
+  stepBox.className = "steps live";
+  const answerBox = document.createElement("div");
+  answerBox.className = "stream-answer";
+  bubble.append(status, stepBox, answerBox);
+
+  const scroll = () => { dom.messages.scrollTop = dom.messages.scrollHeight; };
+  let stopped = false;
 
   try {
-    const data = await api("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: state.sessionId, message: question }),
+    await streamChat(question, state.sessionId, {
+      signal: controller.signal,
+      onEvent(kind, data) {
+        switch (kind) {
+          case "start":
+            status.textContent = "正在分析…";
+            break;
+          case "tool_args":
+            status.textContent = `正在执行 ${data.tool}…`;
+            stepBox.insertAdjacentHTML("beforeend", renderLiveStep(data));
+            scroll();
+            break;
+          case "step":
+            markLiveStep(data);
+            status.textContent = "正在分析…";
+            scroll();
+            break;
+          case "token":
+            // 逐字追加。用 textContent 避免把模型输出当 HTML 执行
+            answerBox.append(document.createTextNode(data.text));
+            scroll();
+            break;
+          case "done": {
+            answerBox.remove();
+            stepBox.className = "";
+            stepBox.remove();
+            bubble.innerHTML =
+              renderMarkdown(data.answer) + renderSteps(data.steps || []);
+            if (data.stop_reason === "max_steps") {
+              bubble.innerHTML += `<p class="err">已达到最大工具调用次数，可点「清空对话」后重新提问。</p>`;
+            } else if (data.stop_reason === "llm_error") {
+              bubble.innerHTML += errorHtml({
+                message: data.answer,
+                requestId: state.lastRequestId,
+              });
+            }
+            break;
+          }
+          case "error":
+            bubble.innerHTML = errorHtml({
+              message: data.message || "分析失败",
+              requestId: state.lastRequestId,
+            });
+            break;
+        }
+      },
     });
-    thinking.innerHTML = renderMarkdown(data.answer) + renderSteps(data.steps);
-    if (data.stop_reason === "max_steps") {
-      thinking.innerHTML += `<p class="err">已达到最大工具调用次数，可点「清空对话」后重新提问。</p>`;
-    } else if (data.stop_reason === "llm_error") {
-      // 模型故障：把 request_id 一并给出，方便对照服务端日志排查
-      thinking.innerHTML += errorHtml({ message: data.answer, requestId: state.lastRequestId });
+    if (stopped) {
+      bubble.querySelector(".stream-status")?.remove();
+      bubble.insertAdjacentHTML(
+        "beforeend",
+        `<p class="stopped">已停止生成（已收到的内容保留在上方）</p>`
+      );
     }
   } catch (err) {
-    thinking.innerHTML = errorHtml(err);
+    if (err.name === "AbortError") {
+      stopped = true;
+      status?.remove();
+      bubble.insertAdjacentHTML(
+        "beforeend",
+        `<p class="stopped">已停止生成（已收到的内容保留在上方）</p>`
+      );
+    } else {
+      status?.remove();
+      stepBox?.remove();
+      bubble.innerHTML = errorHtml(err);
+    }
   } finally {
+    state.controller = null;
     setBusy(false);
     dom.input.focus();
   }
+}
+
+function stopStream() {
+  if (!state.controller) return;
+  state.controller.abort();
 }
 
 function setBusy(busy) {
   state.busy = busy;
   dom.sendBtn.disabled = busy || !state.sessionId;
   dom.input.disabled = busy;
-  dom.composer.querySelector("button").textContent = busy ? "分析中…" : "发送";
+  dom.sendBtn.textContent = busy ? "分析中…" : "发送";
+  dom.stopBtn.hidden = !busy;
 }
 
 /* ---------------------------------------------------------------- 事件绑定 */
@@ -283,6 +461,8 @@ dom.input.addEventListener("keydown", (e) => {
     dom.composer.requestSubmit();
   }
 });
+
+dom.stopBtn.addEventListener("click", stopStream);
 
 dom.samples.addEventListener("click", (e) => {
   if (e.target.tagName !== "LI" || !state.sessionId) return;

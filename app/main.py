@@ -24,7 +24,7 @@ from app.dependencies import describe_settings, get_store
 from app.errors import AppError, ConfigError
 from app.logging_setup import setup_logging
 from app.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
-from app.routers import chat, files
+from app.routers import chat, chat_stream, files
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,7 @@ def create_app() -> FastAPI:
 
     app.include_router(files.router)
     app.include_router(chat.router)
+    app.include_router(chat_stream.router)
 
     @app.get("/api/health", tags=["meta"])
     async def health() -> JSONResponse:

@@ -22,17 +22,36 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agent.events import (
+    EVENT_START,
+    EVENT_STEP,
+    EVENT_TOKEN,
+    EVENT_TOOL_ARGS,
+    AgentEvent,
+)
 from app.agent.prompts import build_system_prompt
 from app.config import Settings, get_settings
-from app.llm.base import LLMClient, LLMError
+from app.llm.base import LLMClient, LLMError, LLMResponse
+from app.logging_setup import describe_arguments
 from app.storage.session_store import Session
 from app.tools.base import ToolContext, humanize_tool_error, split_tool_error
 from app.tools.registry import ToolRegistry, registry
 
 logger = logging.getLogger(__name__)
+
+# 事件回调：Agent 只管调用，是否吞掉异常由调用方决定
+EventEmitter = Callable[[AgentEvent], Awaitable[None]]
+
+
+async def _emit(on_event: EventEmitter | None, event: AgentEvent) -> None:
+    """发送一个事件；没人在听时静默跳过。"""
+    if on_event is None:
+        return
+    await on_event(event)
 
 # 任务漂移告警阈值：工具调用次数超过此值，且最终答案里找不到提问的任何一个词，
 # 说明模型很可能在答别的问题。只告警不阻断。
@@ -140,8 +159,18 @@ class DataAnalystAgent:
         self._settings = settings or get_settings()
 
     # ------------------------------------------------------------------ 对外
-    async def run(self, session: Session | None, question: str) -> AgentResult:
-        """处理一次用户提问。``session`` 为 None 表示用户还没上传文件。"""
+    async def run(
+        self,
+        session: Session | None,
+        question: str,
+        on_event: EventEmitter | None = None,
+    ) -> AgentResult:
+        """处理一次用户提问。``session`` 为 None 表示用户还没上传文件。
+
+        Args:
+            on_event: 可选回调，用于流式输出。Agent 只负责产出事件、不关心谁在
+                消费；LLM 不支持流式时自动降级为一次性返回，行为完全一致。
+        """
         started = time.perf_counter()
         if session is None:
             return self._finish(
@@ -157,6 +186,13 @@ class DataAnalystAgent:
             "Agent Loop 开始 | 问题 %d 字 | 可用工具 %d 个",
             len(question),
             len(self._tools.names()),
+        )
+        await _emit(
+            on_event,
+            AgentEvent(
+                EVENT_START,
+                {"question_len": len(question), "tools": len(self._tools.names())},
+            ),
         )
 
         ctx = ToolContext(
@@ -177,8 +213,8 @@ class DataAnalystAgent:
 
         for turn in range(1, self._settings.max_agent_steps + 1):
             try:
-                # 模型推理（网络 IO，异步）
-                response = await self._llm.chat(working, self._tools.openai_schemas())
+                # 模型推理（网络 IO，异步）。有人在听事件时才走流式。
+                response = await self._call_model(working, on_event, streaming=on_event is not None)
             except LLMError as exc:
                 # 原始异常可能含厂商响应体/端点等内部信息，只进日志；
                 # 用户看到的是脱敏文案，排查靠前端展示的 request_id
@@ -220,6 +256,20 @@ class DataAnalystAgent:
 
             # 执行工具：pandas 是阻塞型 CPU 任务，放到线程池避免卡住事件循环
             for call in response.tool_calls:
+                step_no = len(steps) + 1
+                # 先发 tool_args：UI 立刻显示「正在执行 X」，不必等它跑完
+                await _emit(
+                    on_event,
+                    AgentEvent(
+                        EVENT_TOOL_ARGS,
+                        {
+                            "step": step_no,
+                            "tool": call.name,
+                            "args_summary": describe_arguments(call.arguments),
+                        },
+                    ),
+                )
+                started_at = time.perf_counter()
                 ok, output = await asyncio.to_thread(
                     self._tools.run, call.name, call.arguments, ctx
                 )
@@ -243,6 +293,20 @@ class DataAnalystAgent:
                         result=output,
                         error=error_text,
                     )
+                )
+                await _emit(
+                    on_event,
+                    AgentEvent(
+                        EVENT_STEP,
+                        {
+                            "step": step_no,
+                            "tool": call.name,
+                            "ok": ok,
+                            "duration_ms": round((time.perf_counter() - started_at) * 1000, 1),
+                            "result_chars": len(output),
+                            "error_code": None if ok else split_tool_error(output)[0],
+                        },
+                    ),
                 )
                 working.append(
                     {
@@ -279,6 +343,37 @@ class DataAnalystAgent:
         )
 
     # ------------------------------------------------------------------ 内部
+    async def _call_model(
+        self,
+        messages: list[dict[str, Any]],
+        on_event: EventEmitter | None,
+        *,
+        streaming: bool,
+    ) -> LLMResponse:
+        """调用模型，必要时流式推送增量文本。
+
+        流式能力是**可选**的：客户端不实现 ``chat_stream`` 时退化为一次性调用，
+        并补发一个 token 事件，保证前端在两种路径下表现一致。
+        """
+        schemas = self._tools.openai_schemas()
+        stream = getattr(self._llm, "chat_stream", None) if streaming else None
+
+        if stream is None:
+            response = await self._llm.chat(messages, schemas)
+            if on_event is not None and response.content:
+                await _emit(on_event, AgentEvent(EVENT_TOKEN, {"text": response.content}))
+            return response
+
+        final: LLMResponse | None = None
+        async for event in stream(messages, schemas):
+            if event.kind == "delta":
+                await _emit(on_event, AgentEvent(EVENT_TOKEN, {"text": event.text}))
+            elif event.kind == "done":
+                final = event.response
+        if final is None:
+            raise LLMError("流式响应结束但未返回完整结果")
+        return final
+
     @staticmethod
     def _finish(result: AgentResult, started: float, question: str = "") -> AgentResult:
         """统一的收尾出口：所有 return 都经过这里，保证一定留下耗时与用量日志。"""

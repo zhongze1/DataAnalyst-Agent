@@ -7,12 +7,31 @@ vLLM / Ollama 等所有 OpenAI 兼容端点都能直接用，改 ``AGENT_LLM_BAS
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 from app.config import Settings
-from app.llm.base import LLMError, LLMResponse, ToolCall, parse_tool_arguments
+from app.llm.base import (
+    LLMError,
+    LLMResponse,
+    LLMStreamEvent,
+    ToolCall,
+    parse_tool_arguments,
+)
+
+
+def _safe_json(raw: str) -> dict[str, Any]:
+    """流式拼接的 arguments 可能是半个 JSON，容忍解析失败。"""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class OpenAICompatClient:
@@ -71,6 +90,86 @@ class OpenAICompatClient:
                     await asyncio.sleep(1.5 * (attempt + 1))
 
         raise LLMError(f"模型调用失败: {last_error}") from last_error
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        """SSE 流式生成。
+
+        注意：流式请求里**不能带 tool_choice** —— 部分厂商在 stream 模式下
+        对工具调用支持不完整，踩过一次就够了。
+        """
+        payload: dict[str, Any] = {
+            "model": self._settings.llm_model,
+            "messages": messages,
+            "temperature": self._settings.llm_temperature,
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = tools
+
+        url = f"{self._settings.llm_base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._settings.llm_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        accumulated: list[str] = []
+        tool_calls: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
+        usage: dict[str, Any] = {}
+
+        async with self._client.stream("POST", url, headers=headers, json=payload) as response:
+            if response.status_code >= 400:
+                body = (await response.aread()).decode("utf-8", errors="replace")
+                raise LLMError(f"请求 {url} 返回 {response.status_code}: {body[:500]}")
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                chunk = line[5:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    data = json.loads(chunk)
+                except ValueError:
+                    continue
+                if data.get("usage"):
+                    usage = data["usage"]
+                for choice in data.get("choices") or []:
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    delta = choice.get("delta") or {}
+                    for item in delta.get("tool_calls") or []:
+                        index = item.get("index", len(tool_calls))
+                        slot = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                        if item.get("id"):
+                            slot["id"] = item["id"]
+                        function = item.get("function") or {}
+                        if function.get("name"):
+                            slot["name"] = function["name"]
+                        if function.get("arguments"):
+                            slot["arguments"] += function["arguments"]
+                    text = delta.get("content") or ""
+                    if text:
+                        accumulated.append(text)
+                        yield LLMStreamEvent(kind="delta", text=text)
+
+        parsed_calls = [
+            ToolCall(id=slot["id"] or f"call_{i}", name=slot["name"], arguments=_safe_json(slot["arguments"]))
+            for i, slot in sorted(tool_calls.items())
+            if slot["name"]
+        ]
+        yield LLMStreamEvent(
+            kind="done",
+            response=LLMResponse(
+                content="".join(accumulated).strip(),
+                tool_calls=parsed_calls,
+                usage=usage,
+            ),
+        )
+        _ = finish_reason  # 保留以便将来区分 length / tool_calls 截断
 
     @staticmethod
     def _parse(data: dict[str, Any]) -> LLMResponse:
