@@ -4,11 +4,29 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """开发期禁用静态资源缓存。
+
+    本项目前端是无构建的原生 JS，文件名不带内容哈希。Starlette 默认不发
+    Cache-Control，浏览器会按启发式规则把旧文件留在本地 —— 表现为「改了
+    JS 但页面行为不变」，排查极费时间。
+
+    ``no-cache`` 的语义是「每次回源校验」而非「不许存」：配合 ETag，文件
+    没变回 304，变了才传新内容。既保证新鲜，又不浪费带宽。
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
@@ -181,7 +199,7 @@ def create_app() -> FastAPI:
     async def index() -> FileResponse:
         return FileResponse(INDEX_FILE)
 
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", NoCacheStaticFiles(directory=str(STATIC_DIR)), name="static")
     return app
 
 

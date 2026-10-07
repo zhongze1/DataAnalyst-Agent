@@ -115,7 +115,18 @@ async function restoreLastSession() {
 }
 
 (function initHistory() {
-  bindHistory();
-  loadHistory();
-  restoreLastSession();
+  // 容器缺失必须显式报错：否则 bindHistory() 抛错会静默中断，
+  // 表现为面板永远停在「加载中…」，毫无线索
+  if (!dom.history) {
+    console.error("[history] 页面缺少 #history 容器，历史面板已禁用");
+    return;
+  }
+  try {
+    bindHistory();
+    loadHistory();
+    restoreLastSession();
+  } catch (err) {
+    console.error("[history] 初始化失败", err);
+    dom.history.innerHTML = `<p class="empty">历史面板初始化失败：${escapeHtml(err.message)}</p>`;
+  }
 })();
