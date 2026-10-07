@@ -24,7 +24,8 @@ from app.dependencies import describe_settings, get_store
 from app.errors import AppError, ConfigError
 from app.logging_setup import setup_logging
 from app.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
-from app.routers import chat, chat_stream, files
+from app.storage.migrate import migrate_meta_files
+from app.routers import chat, chat_stream, files, sessions
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +141,14 @@ async def lifespan(app: FastAPI):
             len(problems),
         )
 
-    logger.info("运行时配置 | %s", runtime_summary(settings))
     store = get_store()
+    # 旧版会话索引只存在 meta.json 里，首次启动自动导入数据库（幂等）
+    try:
+        migrate_meta_files(store.repo, settings.upload_dir)
+    except Exception:  # 迁移失败不应阻止启动
+        logger.warning("历史会话迁移失败", exc_info=True)
+
+    logger.info("运行时配置 | %s", runtime_summary(settings))
     logger.info(
         "已恢复 %d 个历史会话 | 会话目录: %s", len(store.list_sessions()), settings.upload_dir
     )
@@ -164,6 +171,7 @@ def create_app() -> FastAPI:
     app.include_router(files.router)
     app.include_router(chat.router)
     app.include_router(chat_stream.router)
+    app.include_router(sessions.router)
 
     @app.get("/api/health", tags=["meta"])
     async def health() -> JSONResponse:

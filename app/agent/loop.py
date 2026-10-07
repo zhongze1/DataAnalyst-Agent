@@ -47,6 +47,21 @@ logger = logging.getLogger(__name__)
 EventEmitter = Callable[[AgentEvent], Awaitable[None]]
 
 
+def _as_steps(steps: list[ToolStep]) -> list[dict[str, Any]]:
+    """ToolStep -> 可 JSON 序列化的 dict（落盘与接口共用一份形状）。"""
+    return [
+        {
+            "step": s.step,
+            "tool": s.tool,
+            "arguments": s.arguments,
+            "ok": s.ok,
+            "result": s.result,
+            "error": s.error,
+        }
+        for s in steps
+    ]
+
+
 async def _emit(on_event: EventEmitter | None, event: AgentEvent) -> None:
     """发送一个事件；没人在听时静默跳过。"""
     if on_event is None:
@@ -179,6 +194,8 @@ class DataAnalystAgent:
                     stop_reason="no_file",
                 ),
                 started,
+                session,
+                [],
                 question,
             )
 
@@ -235,6 +252,8 @@ class DataAnalystAgent:
                         stop_reason="llm_error",
                     ),
                     started,
+                    session,
+                    _as_steps(steps),
                     question,
                 )
 
@@ -251,6 +270,8 @@ class DataAnalystAgent:
                         usage=usage,
                     ),
                     started,
+                    session,
+                    _as_steps(steps),
                     question,
                 )
 
@@ -339,10 +360,21 @@ class DataAnalystAgent:
         return self._finish(
             AgentResult(answer=answer, steps=steps, stop_reason=stop_reason, usage=usage),
             started,
+            session,
+            _as_steps(steps),
             question,
         )
 
     # ------------------------------------------------------------------ 内部
+    def _save(self, session: Session | None, steps: list[dict[str, Any]] | None) -> None:
+        """把这一轮对话落盘。落库失败只记日志，不能让用户白等一场。"""
+        if session is None or not session.messages:
+            return
+        try:
+            self._store.save_turn(session, steps)
+        except Exception:
+            logger.exception("会话落盘失败 | session=%s", session.session_id)
+
     async def _call_model(
         self,
         messages: list[dict[str, Any]],
@@ -374,9 +406,16 @@ class DataAnalystAgent:
             raise LLMError("流式响应结束但未返回完整结果")
         return final
 
-    @staticmethod
-    def _finish(result: AgentResult, started: float, question: str = "") -> AgentResult:
+    def _finish(
+        self,
+        result: AgentResult,
+        started: float,
+        session: Session | None = None,
+        steps: list[dict[str, Any]] | None = None,
+        question: str = "",
+    ) -> AgentResult:
         """统一的收尾出口：所有 return 都经过这里，保证一定留下耗时与用量日志。"""
+        self._save(session, steps)
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         failed = sum(1 for step in result.steps if not step.ok)
         if question:

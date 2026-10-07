@@ -3,6 +3,7 @@
 const state = {
   controller: null,
   sessionId: null,
+  history: [],
   sheets: [],
   busy: false,
 };
@@ -22,6 +23,7 @@ const dom = {
   input: el("input"),
   sendBtn: el("sendBtn"),
   stopBtn: el("stopBtn"),
+  history: el("history"),
   resetBtn: el("resetBtn"),
 };
 
@@ -198,6 +200,7 @@ async function uploadFile(file) {
     const info = await api("/api/files/upload", { method: "POST", body: form });
     state.sessionId = info.file.session_id;
     state.sheets = info.file.sheets;
+    localStorage.setItem("dataanalyst.sessionId", state.sessionId);
 
     dom.fileInfo.className = "file-info";
     dom.fileInfo.innerHTML = `<strong>${info.file.filename}</strong>`
@@ -205,6 +208,7 @@ async function uploadFile(file) {
     dom.sheetList.innerHTML = info.file.sheets.map((s) => `<span class="chip">${s}</span>`).join("");
     dom.resetBtn.disabled = false;
     setBusy(false);
+    loadHistory();
     addMessage("assistant", renderMarkdown(
       `文件 **${info.file.filename}** 上传成功，包含 ${info.file.sheets.length} 个工作表：`
       + `${info.file.sheets.map((s) => `\`${s}\``).join("、")}。\n\n请描述你的分析问题，我会自主读取数据并计算。`

@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # 关闭时只打 ERROR 日志，服务照常启动，便于临时带着问题调试
     strict_config: bool = True
 
+    # ---- 会话持久化 ----
+    # SQLite 单文件；换 PostgreSQL 时改这里 + 换 repository 实现
+    db_path: Path = DATA_DIR / "agent.db"
+
     # ---- 审计 ----
     # 工具调用审计（JSONL），与日志分开：日志给运维看，审计给合规看
     audit_dir: Path = DATA_DIR / "audit"

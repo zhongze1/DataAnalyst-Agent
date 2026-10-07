@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 import app.agent.loop
 import app.audit
 import app.config
+import app.storage.session_store
 import app.dependencies
 import app.main
 import app.storage.session_store
@@ -31,6 +32,7 @@ from app.dependencies import get_agent, get_store
 from app.llm.mock_client import MockLLMClient
 from app.main import app as fastapi_app
 from app.storage.session_store import Session, SessionStore
+from app.storage.sqlite_repo import SqliteSessionRepository
 from app.tools import registry as global_registry
 from app.tools.registry import ToolRegistry
 from stubs import SHEET_MAIN, SHEET_SUMMARY
@@ -45,6 +47,7 @@ def settings(tmp_path: Path) -> Settings:
         llm_provider="mock",
         upload_dir=tmp_path / "uploads",
         audit_dir=tmp_path / "audit",
+        db_path=tmp_path / "agent.db",
         max_agent_steps=6,
         max_tool_output_chars=2000,
         max_upload_bytes=10 * 1024 * 1024,
@@ -109,7 +112,9 @@ def registry() -> ToolRegistry:
 
 @pytest.fixture
 def store(settings: Settings) -> SessionStore:
-    return SessionStore(root=settings.upload_dir)
+    """注入指向 tmp_path 的 repository，确保测试不碰真实 data/agent.db。"""
+    repo = SqliteSessionRepository(settings.db_path)
+    return SessionStore(root=settings.upload_dir, repo=repo)
 
 
 @pytest.fixture

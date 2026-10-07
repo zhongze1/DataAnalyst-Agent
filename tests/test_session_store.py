@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pandas as pd
 import pytest
 
@@ -11,18 +9,22 @@ from app.errors import FileEmptyError, FileParseError, FileTooLargeError, FileTy
 from app.storage.session_store import META_NAME, SessionStore
 
 
-def test_create_writes_file_and_meta(store: SessionStore, sample_xlsx: bytes) -> None:
+def test_create_writes_file_and_record(store: SessionStore, sample_xlsx: bytes) -> None:
+    """W2-1：元数据进数据库，不再写 meta.json（那只是旧数据迁移的产物）。"""
     session = store.create("销售数据.xlsx", sample_xlsx)
     assert session.path.exists()
     assert session.path.read_bytes() == sample_xlsx
     assert session.sheets == ["明细", "摘要"]
     assert session.size_bytes == len(sample_xlsx)
 
-    meta_file = session.path.parent / META_NAME
-    meta = json.loads(meta_file.read_text(encoding="utf-8"))
-    assert meta["session_id"] == session.session_id
-    assert meta["filename"] == "销售数据.xlsx"
-    assert meta["sheets"] == ["明细", "摘要"]
+    record = store.repo.get_session(session.session_id)
+    assert record is not None
+    assert record.filename == "销售数据.xlsx"
+    assert record.sheets == ["明细", "摘要"]
+    assert record.turn_count == 0
+    assert record.file_path == str(session.path)
+    # 新代码不再产生 meta.json
+    assert not (session.path.parent / META_NAME).exists()
 
 
 def test_rejects_unsupported_suffix(store: SessionStore, sample_xlsx: bytes) -> None:

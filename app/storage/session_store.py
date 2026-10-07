@@ -1,19 +1,18 @@
-"""会话与文件存储。
+"""会话仓库：**内存只是缓存，SQLite 才是真相**。
 
-每个会话对应磁盘目录 ``data/uploads/<session_id>/``：
-    - ``<原文件名>``  上传的 Excel 原文
-    - ``meta.json``    会话元信息（文件名、工作表列表、创建时间）
+改造前：``self._sessions`` 既是索引也是数据，进程一停对话全丢。
+改造后：
+    - 元数据与消息 → :class:`SessionRepository`（持久化）
+    - ``Session`` 对象与 DataFrame → 进程内缓存，按需从 repository 重建
 
-DataFrame 按需加载并缓存在内存 ``Session.frames`` 中，进程重启后仍可继续提问。
+上传的 Excel 仍留在磁盘，因为 pandas 需要真实文件路径。
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,58 +25,125 @@ from app.errors import (
     FileTooLargeError,
     FileTypeError,
 )
+from app.storage.repository import MessageRecord, SessionRecord, SessionRepository
+from app.storage.sqlite_repo import SqliteSessionRepository, utc_now
 
 logger = logging.getLogger(__name__)
 
-META_NAME = "meta.json"
+META_NAME = "meta.json"  # 仅用于旧数据迁移，新代码不再写
 
 
 @dataclass
 class Session:
-    """一次分析会话：一份文件 + 一段对话历史。"""
+    """一次分析会话的内存视图。
+
+    ``frames`` 是 DataFrame 缓存，**不持久化** —— 可从 :attr:`path` 重建，
+    属于缓存而非数据。``messages`` 与 :attr:`path` 一起构成「当前工作集」。
+    """
 
     session_id: str
     filename: str
     path: Path
     sheets: list[str] = field(default_factory=list)
     created_at: str = ""
+    updated_at: str = ""
+    turn_count: int = 0
+    owner_id: str | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     frames: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     @property
     def size_bytes(self) -> int:
-        return self.path.stat().st_size if self.path.exists() else 0
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return 0
 
-    def to_meta(self) -> dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "filename": self.filename,
-            "sheets": self.sheets,
-            "created_at": self.created_at,
-        }
+    def last_question(self, limit: int = 40) -> str:
+        """最后一条用户提问的摘要，用于历史列表展示。"""
+        for message in reversed(self.messages):
+            if message.get("role") == "user":
+                text = str(message.get("content", "")).strip().replace("\n", " ")
+                return text[:limit]
+        return ""
 
 
 class SessionStore:
-    """会话仓库。"""
+    """会话仓库：元数据与消息持久化，文件与 DataFrame 走内存缓存。
 
-    def __init__(self, root: Path | None = None) -> None:
+    读路径：内存缓存 → repository → 重建 Session。
+    写路径：repository（持久）+ 更新内存缓存。
+    """
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        repo: SessionRepository | None = None,
+    ) -> None:
         self._root = Path(root or get_settings().upload_dir or UPLOAD_DIR)
         self._root.mkdir(parents=True, exist_ok=True)
-        self._sessions: dict[str, Session] = {}
-        self.load_all()
+        self._repo = repo if repo is not None else SqliteSessionRepository(get_settings().db_path)
+        self._cache: dict[str, Session] = {}
+        self._warm_cache()
+
+    @property
+    def repo(self) -> SessionRepository:
+        return self._repo
+
+    def _warm_cache(self) -> None:
+        """启动时把会话索引进内存（不预热 DataFrame 与全部消息）。"""
+        for record in self._repo.list_sessions(limit=10_000):
+            if not Path(record.file_path).exists():
+                logger.warning("会话文件缺失，跳过: %s", record.file_path)
+                continue
+            self._cache[record.session_id] = _session_from_record(record)
+        logger.info("已从数据库恢复 %d 个会话", len(self._cache))
 
     # ------------------------------------------------------------- 查询
     def get(self, session_id: str | None) -> Session | None:
+        """取会话。**必须保持对象身份**。
+
+        Agent Loop 直接往 ``session.messages`` 上追加内容，调用方（如测试
+        fixture）也持有同一个对象。如果这里在缓存命中时「顺手」新建对象替换
+        缓存，写入就会落到一个没人引用的对象上 —— 曾经踩过这个坑。
+        因此：缓存命中就复用同一实例，只在需要时把消息**灌进**它。
+        """
         if not session_id:
             return None
-        return self._sessions.get(session_id)
+        session = self._cache.get(session_id)
+        if session is None:
+            record = self._repo.get_session(session_id)
+            if record is None:
+                return None
+            if not Path(record.file_path).exists():
+                logger.warning("会话文件缺失: %s", record.file_path)
+                return None
+            session = _session_from_record(record)
+            self._cache[session_id] = session
+        if not session.messages:
+            # 消息可能是空的（新会话，或进程重启后首次访问）—— 从库里补齐
+            loaded = _restore_messages(self._repo.get_messages(session_id))
+            if loaded:
+                session.messages = loaded
+        return session
 
     def list_sessions(self) -> list[Session]:
-        return sorted(self._sessions.values(), key=lambda s: s.created_at, reverse=True)
+        """历史会话列表，按最近活跃倒序。走数据库，不扫目录。"""
+        records = self._repo.list_sessions()
+        previews = self._repo.last_user_messages([r.session_id for r in records])
+        sessions: list[Session] = []
+        for record in records:
+            # 用副本，列表页的摘要不能污染缓存里的真实会话对象
+            session = _session_from_record(record)
+            preview = previews.get(record.session_id, "")
+            if preview:
+                session.messages = [{"role": "user", "content": preview}]
+            sessions.append(session)
+        return sessions
 
     # ------------------------------------------------------------- 写入
     def create(self, filename: str, content: bytes) -> Session:
-        """落盘一份上传文件并建立会话。"""
+        """落盘一份上传文件并在数据库建立会话。"""
         settings = get_settings()
         suffix = Path(filename).suffix.lower()
         if suffix not in settings.allowed_suffixes:
@@ -99,67 +165,76 @@ class SessionStore:
         try:
             sheets = self.list_sheet_names(target)
         except Exception as exc:
-            # 解析失败则清理目录，避免留下脏会话。
+            # 解析失败则清理目录，不留半截会话。
             # 真实原因（openpyxl 报错细节）只进日志，不进响应体。
             target.unlink(missing_ok=True)
             folder.rmdir()
             logger.warning("Excel 解析失败 | 文件名=%s | 原因=%s", filename, exc, exc_info=True)
             raise FileParseError(cause=exc) from exc
 
-        session = Session(
+        now = utc_now()
+        record = SessionRecord(
             session_id=session_id,
             filename=target.name,
-            path=target,
+            file_path=str(target),
             sheets=sheets,
-            created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            created_at=now,
+            updated_at=now,
+            turn_count=0,
         )
-        (folder / META_NAME).write_text(
-            json.dumps(session.to_meta(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        self._sessions[session_id] = session
+        try:
+            self._repo.upsert_session(record)
+        except Exception:
+            # 入库失败要把文件收回去，否则磁盘上留孤儿文件
+            target.unlink(missing_ok=True)
+            folder.rmdir()
+            logger.exception("会话入库失败")
+            raise
+        session = _session_from_record(record)
+        self._cache[session_id] = session
         logger.info("新会话 %s：%s（%s）", session_id, session.filename, sheets)
         return session
 
+    def save_turn(self, session: Session, steps: list[dict[str, Any]] | None = None) -> None:
+        """一轮对话结束后持久化：消息全量替换 + 会话元数据更新。
+
+        整体替换而非增量追加：消息最多几十条，代价可忽略，而增量追踪
+        迟早会因为中途异常导致顺序漂移。
+        """
+        if not session.messages:
+            return
+        turn_count = sum(1 for m in session.messages if m.get("role") == "user")
+        self._repo.replace_messages(
+            session.session_id, _to_records(session, steps)
+        )
+        session.turn_count = turn_count
+        session.updated_at = utc_now()
+        self._repo.upsert_session(_to_record(session))
+
     def reset_messages(self, session: Session) -> None:
+        """清空对话历史（保留已上传的数据与文件）。"""
         session.messages.clear()
+        self._repo.replace_messages(session.session_id, [])
+        session.turn_count = 0
+        session.updated_at = utc_now()
+        self._repo.upsert_session(_to_record(session))
 
     def delete(self, session_id: str) -> bool:
-        session = self._sessions.pop(session_id, None)
-        if not session:
-            return False
-        folder = self._root / session_id
-        for child in folder.glob("*"):
-            child.unlink(missing_ok=True)
-        folder.rmdir()
-        return True
-
-    # ------------------------------------------------------------- 磁盘
-    def load_all(self) -> None:
-        """启动时从磁盘恢复会话索引（只恢复文件与工作表，不恢复对话历史）。"""
-        if not self._root.exists():
-            return
-        for folder in self._root.iterdir():
-            meta_file = folder / META_NAME
-            if not folder.is_dir() or not meta_file.exists():
-                continue
+        session = self._cache.pop(session_id, None)
+        record = self._repo.get_session(session_id)
+        path = Path(record.file_path) if record else (session.path if session else None)
+        deleted = self._repo.delete_session(session_id)
+        if path is not None:
+            folder = path.parent
             try:
-                meta = json.loads(meta_file.read_text(encoding="utf-8"))
-                candidates = [
-                    p for p in folder.iterdir()
-                    if p.is_file() and p.name != META_NAME
-                ]
-                if not candidates:
-                    continue
-                path = candidates[0]
-                self._sessions[meta["session_id"]] = Session(
-                    session_id=meta["session_id"],
-                    filename=meta.get("filename", path.name),
-                    path=path,
-                    sheets=meta.get("sheets", []),
-                    created_at=meta.get("created_at", ""),
-                )
-            except Exception:  # pragma: no cover - 损坏的会话直接跳过
-                logger.warning("跳过损坏会话目录: %s", folder)
+                # 只删 uploads 下的一级子目录，避免误伤用户手动放的文件
+                if folder.is_dir() and folder.parent == self._root:
+                    for child in folder.glob("*"):
+                        child.unlink(missing_ok=True)
+                    folder.rmdir()
+            except OSError:
+                logger.warning("删除会话文件失败: %s", folder, exc_info=True)
+        return deleted or session is not None
 
     # ------------------------------------------------------------- 工具方法
     @staticmethod
@@ -171,3 +246,60 @@ class SessionStore:
     def read_frame(path: str | Path, sheet: str) -> pd.DataFrame:
         """读取单个工作表为 DataFrame（由工具层按需调用）。"""
         return pd.read_excel(path, sheet_name=sheet)
+
+
+# --------------------------------------------------------------------- 转换
+def _to_record(session: Session) -> SessionRecord:
+    return SessionRecord(
+        session_id=session.session_id,
+        filename=session.filename,
+        file_path=str(session.path),
+        sheets=list(session.sheets),
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        turn_count=session.turn_count,
+        owner_id=session.owner_id,
+    )
+
+
+def _session_from_record(record: SessionRecord) -> Session:
+    return Session(
+        session_id=record.session_id,
+        filename=record.filename,
+        path=Path(record.file_path),
+        sheets=list(record.sheets),
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        turn_count=record.turn_count,
+        owner_id=record.owner_id,
+    )
+
+
+def _to_records(session: Session, steps: list[dict[str, Any]] | None) -> list[MessageRecord]:
+    """消息 → 待落库记录；轨迹快照挂在最后一条 assistant 上。
+
+    ``payload`` 存完整消息：assistant 的 tool_calls、tool 的 tool_call_id
+    都在里面，缺了会导致恢复会话后模型接口报错。
+    """
+    last_assistant = max(
+        (i for i, m in enumerate(session.messages) if m.get("role") == "assistant"),
+        default=-1,
+    )
+    records: list[MessageRecord] = []
+    for index, message in enumerate(session.messages):
+        records.append(
+            MessageRecord(
+                message_id=uuid.uuid4().hex,
+                session_id=session.session_id,
+                role=str(message.get("role", "user")),
+                payload=dict(message),
+                steps=steps if (index == last_assistant and steps) else None,
+                created_at=utc_now(),
+            )
+        )
+    return records
+
+
+def _restore_messages(records: list[MessageRecord]) -> list[dict[str, Any]]:
+    """数据库记录 → Agent Loop 需要的消息列表（无损）。"""
+    return [dict(record.payload) for record in records if record.payload]

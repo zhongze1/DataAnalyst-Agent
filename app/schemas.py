@@ -55,6 +55,34 @@ class HealthResponse(BaseModel):
     model: str
 
 
+# ----------------------------------------------------------------- 会话历史
+class SessionSummary(BaseModel):
+    """历史会话列表项（不含完整对话，避免列表响应过大）。"""
+
+    session_id: str
+    filename: str
+    sheets: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+    turn_count: int = 0
+    size_bytes: int = 0
+    preview: str = Field(default="", description="最后一条提问的摘要")
+
+
+class SessionDetail(BaseModel):
+    """会话详情：含完整消息序列，用于刷新页面后恢复界面。"""
+
+    session_id: str
+    filename: str
+    sheets: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+    turn_count: int = 0
+    size_bytes: int = 0
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    last_step_count: int = 0
+
+
 # ----------------------------------------------------------------- 错误响应
 class ErrorDetail(BaseModel):
     """统一错误体。``message`` 保证是脱敏后的人工文案。"""
