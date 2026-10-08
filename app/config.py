@@ -64,6 +64,19 @@ class Settings(BaseSettings):
     # 关闭时只打 ERROR 日志，服务照常启动，便于临时带着问题调试
     strict_config: bool = True
 
+    # ---- 认证 ----
+    # 开发时可置 false 免登录；生产务必开启
+    auth_enabled: bool = True
+    # 首次启动时自动创建该管理员（不提供开放注册）
+    auth_admin_username: str = ""
+    auth_admin_password: str = ""
+    auth_session_ttl_hours: int = 12
+    auth_cookie_name: str = "agent_session"
+    # 生产环境走 HTTPS 时应置 true
+    auth_cookie_secure: bool = False
+    # PBKDF2 迭代数：生产用 OWASP 推荐值，测试会调低以提速
+    auth_password_iterations: int = 600_000
+
     # ---- 会话持久化 ----
     # SQLite 单文件；换 PostgreSQL 时改这里 + 换 repository 实现
     db_path: Path = DATA_DIR / "agent.db"

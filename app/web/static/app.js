@@ -35,6 +35,13 @@ async function api(path, options = {}) {
   try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
   // 任何响应都带 X-Request-ID，200 的异常场景（如模型故障）也要能报障
   state.lastRequestId = res.headers.get("X-Request-ID") || null;
+  if (res.status === 401 && !path.startsWith("/api/auth/")) {
+    // 登录态可能在分析途中过期：直接把人送回登录页，而不是抛一个看不懂的错误
+    window.showLogin?.("登录状态已失效，请重新登录");
+    const expired = new Error("登录状态已失效，请重新登录");
+    expired.code = "AUTH_REQUIRED";
+    throw expired;
+  }
   if (!res.ok) {
     // 统一错误体：{error:{code,message,request_id}}；detail 兜底兼容旧格式
     const message = data?.error?.message || data?.detail || `请求失败 (${res.status})`;

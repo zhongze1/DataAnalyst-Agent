@@ -75,6 +75,59 @@ class MessageRecord:
         self.content = "" if raw is None else str(raw)
 
 
+@dataclass
+class UserRecord:
+    """用户。``password_hash`` 用 :mod:`app.security.passwords` 的编码格式。"""
+
+    user_id: str
+    username: str
+    password_hash: str
+    display_name: str = ""
+    role: str = "analyst"
+    disabled: bool = False
+    created_at: str = ""
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
+
+
+@dataclass
+class AuthSessionRecord:
+    """登录会话。
+
+    ``token_hash`` 是 Cookie 令牌的 SHA-256，**不是明文**；数据库泄露时
+    攻击者拿不到可直接使用的凭据。
+    """
+
+    token_hash: str
+    user_id: str
+    created_at: str
+    expires_at: str
+    user_agent: str = ""
+
+
+@runtime_checkable
+class AuthRepository(Protocol):
+    """用户与登录会话的持久化接口。SQL 同样只允许出现在 DAO 层。"""
+
+    # ---------------------------------------------------------- 用户
+    def create_user(self, record: UserRecord) -> UserRecord: ...
+    def get_user(self, user_id: str) -> UserRecord | None: ...
+    def get_user_by_username(self, username: str) -> UserRecord | None: ...
+    def list_users(self) -> list[UserRecord]: ...
+    def count_users(self) -> int: ...
+    def update_password(self, user_id: str, password_hash: str) -> None: ...
+    def set_disabled(self, user_id: str, disabled: bool) -> None: ...
+
+    # ---------------------------------------------------------- 登录会话
+    def create_auth_session(self, record: AuthSessionRecord) -> None: ...
+    def get_auth_session(self, token_hash: str) -> AuthSessionRecord | None: ...
+    def delete_auth_session(self, token_hash: str) -> None: ...
+    def delete_user_sessions(self, user_id: str, *, keep: str | None = None) -> int: ...
+    def purge_expired_sessions(self) -> int: ...
+
+
 @runtime_checkable
 class SessionRepository(Protocol):
     """会话与消息的持久化接口。
@@ -98,6 +151,10 @@ class SessionRepository(Protocol):
     def delete_session(self, session_id: str) -> bool: ...
 
     def count_sessions(self) -> int: ...
+
+    def claim_orphan_sessions(self, owner_id: str) -> int:
+        """把 owner_id 为空的分析会话归给指定用户，返回迁移条数。"""
+        ...
 
     # ---------------------------------------------------------- 消息
     def replace_messages(self, session_id: str, messages: list[MessageRecord]) -> None:

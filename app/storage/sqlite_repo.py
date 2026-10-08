@@ -135,10 +135,23 @@ class SqliteSessionRepository:
             ).fetchone()
         return _row_to_session(row) if row else None
 
-    def list_sessions(self, limit: int = 200) -> list[SessionRecord]:
-        sql = "SELECT * FROM sessions ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+    def list_sessions(
+        self, limit: int = 200, owner_id: str | None = None
+    ) -> list[SessionRecord]:
+        """列出会话。
+
+        ``owner_id`` 为 None 表示**不过滤**（认证关闭时用）；给出用户 id 时
+        只返回该用户的会话。认证开启后调用方总会传真实 id，因此 None 不会
+        造成「看到别人会话」的风险。
+        """
+        sql = "SELECT * FROM sessions"
+        params: tuple = ()
+        if owner_id is not None:
+            sql += " WHERE owner_id = ?"
+            params = (owner_id,)
+        sql += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
         with self._lock:
-            rows = self._conn.execute(sql, (int(limit),)).fetchall()
+            rows = self._conn.execute(sql, (*params, int(limit))).fetchall()
         return [_row_to_session(row) for row in rows]
 
     def delete_session(self, session_id: str) -> bool:
@@ -155,6 +168,20 @@ class SqliteSessionRepository:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()
         return int(row["n"]) if row else 0
+
+    def claim_orphan_sessions(self, owner_id: str) -> int:
+        """把 owner_id 为空的分析会话归给指定用户，返回迁移条数。
+
+        只在首次创建管理员后执行一次：这批会话产生于「无登录」时代，
+        本来就是部署者一个人的历史数据，不该被丢弃。
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE sessions SET owner_id = ?"
+                " WHERE owner_id IS NULL OR owner_id = ''",
+                (owner_id,),
+            )
+        return cursor.rowcount
 
     # ----------------------------------------------------------------- 消息
     def replace_messages(self, session_id: str, messages: list[MessageRecord]) -> None:

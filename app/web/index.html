@@ -16,8 +16,21 @@
       </div>
     </div>
     <div class="health" id="health">连接中…</div>
+    <div class="user-bar" id="userBar"></div>
   </header>
 
+  <div class="login-wrap" id="loginCard" hidden>
+    <form class="login-card" id="loginForm">
+      <h2>登录</h2>
+      <p class="login-sub">请登录后使用 DataAnalyst Agent</p>
+      <label>用户名<input id="loginUsername" autocomplete="username" required /></label>
+      <label>密码<input id="loginPassword" type="password" autocomplete="current-password" required /></label>
+      <p class="login-error" id="loginError"></p>
+      <button type="submit" id="loginBtn">登录</button>
+    </form>
+  </div>
+
+  <div id="appMain">
   <main class="layout">
     <!-- 左栏：数据源 -->
     <aside class="panel sidebar">
@@ -76,8 +89,10 @@
       </form>
     </section>
   </main>
+  </div>
 
   <script src="/static/app.js"></script>
+  <script src="/static/auth.js"></script>
   <script src="/static/history.js"></script>
 </body>
 </html>

@@ -80,3 +80,43 @@ class ConfigError(AppError):
     code = "CONFIG_ERROR"
     http_status = 500
     default_message = "服务配置不合法"
+
+# ----------------------------------------------------------------- 认证类
+class AuthError(AppError):
+    """认证相关失败（登录态无效、账号停用等）。"""
+
+    code = "AUTH_ERROR"
+    http_status = 401
+    default_message = "登录状态无效，请重新登录"
+
+
+class InvalidCredentialsError(AuthError):
+    """用户名或口令错误。
+
+    用户不存在与口令错误共用这一种异常、同一句文案 —— **刻意不区分**。
+    区分开就等于给了攻击者一个枚举用户名的工具。
+    """
+
+    code = "INVALID_CREDENTIALS"
+    http_status = 401
+    default_message = "用户名或密码错误"
+
+
+class AuthRequiredError(AuthError):
+    """需要登录但未登录。"""
+
+    code = "AUTH_REQUIRED"
+    http_status = 401
+    default_message = "请先登录"
+
+
+class PermissionDeniedError(AppError):
+    """已登录但无权访问该资源。
+
+    注意：会话归属校验失败时**应当返回 404 而非 403** —— 403 等于告诉
+    对方「这个 id 确实存在」，本身就是信息泄露。
+    """
+
+    code = "PERMISSION_DENIED"
+    http_status = 403
+    default_message = "没有权限执行该操作"

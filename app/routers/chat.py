@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 
 from app.agent.loop import DataAnalystAgent
 from app.context import set_session_id
-from app.dependencies import get_agent, get_store
+from app.dependencies import get_agent, get_store, require_user
 from app.errors import SessionNotFoundError
 from app.schemas import ERROR_RESPONSES, ChatRequest, ChatResponse, ToolStep
 from app.storage.session_store import SessionStore
@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"], responses=ERROR_RESPONSES)
 async def chat(
     payload: ChatRequest,
     agent: DataAnalystAgent = Depends(get_agent),
+    user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> ChatResponse:
     """单 Agent Loop 的入口：一次提问 = 一次完整的「思考 → 调工具 → 观察 → 回答」。"""
@@ -51,6 +52,7 @@ async def chat(
 @router.post("/reset")
 async def reset_conversation(
     session_id: str,
+    user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> dict[str, bool]:
     """清空对话历史（保留已上传的数据），开始一轮新的分析。"""

@@ -10,9 +10,11 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from app.dependencies import get_store
+from app.config import get_settings
+from app.dependencies import get_store, owner_filter, require_user
 from app.errors import SessionNotFoundError
 from app.schemas import SessionDetail, SessionSummary
+from app.storage.repository import UserRecord
 from app.storage.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -21,10 +23,16 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
 @router.get("", response_model=list[SessionSummary])
-async def list_sessions(store: SessionStore = Depends(get_store)) -> list[SessionSummary]:
-    """历史会话列表，按最近活跃倒序。不含完整对话，只带摘要。"""
+async def list_sessions(
+    user: UserRecord = Depends(require_user),
+    store: SessionStore = Depends(get_store),
+) -> list[SessionSummary]:
+    """历史会话列表，按最近活跃倒序。不含完整对话，只带摘要。
+
+    只返回当前用户自己的会话 —— 认证不是装饰，归属过滤必须落在查询上。
+    """
     summaries: list[SessionSummary] = []
-    for session in store.list_sessions():
+    for session in store.list_sessions(owner_id=owner_filter(user)):
         summaries.append(
             SessionSummary(
                 session_id=session.session_id,
@@ -41,13 +49,28 @@ async def list_sessions(store: SessionStore = Depends(get_store)) -> list[Sessio
     return summaries
 
 
+def _ensure_owner(session, user) -> None:
+    """归属校验：不是自己的会话就当「不存在」。
+
+    刻意返回 404 而不是 403 —— 403 等于告诉对方「这个 id 确实存在」，
+    本身就是信息泄露。
+    """
+    settings = get_settings()
+    if not settings.auth_enabled:
+        return
+    if session is None or session.owner_id != (user.user_id if user else None):
+        raise SessionNotFoundError()
+
+
 @router.get("/{session_id}", response_model=SessionDetail)
 async def get_session_detail(
     session_id: str,
+    user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> SessionDetail:
     """会话详情：含完整消息序列，用于刷新后恢复界面。"""
     session = store.get(session_id)
+    _ensure_owner(session, user)
     if session is None:
         raise SessionNotFoundError()
     records = store.repo.get_messages(session_id)

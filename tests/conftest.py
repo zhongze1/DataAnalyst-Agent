@@ -21,6 +21,11 @@ from fastapi.testclient import TestClient
 import app.agent.loop
 import app.audit
 import app.config
+import app.routers.auth
+import app.routers.chat
+import app.routers.chat_stream
+import app.routers.files
+import app.routers.sessions
 import app.storage.session_store
 import app.dependencies
 import app.main
@@ -33,6 +38,12 @@ from app.llm.mock_client import MockLLMClient
 from app.main import app as fastapi_app
 from app.storage.session_store import Session, SessionStore
 from app.storage.sqlite_repo import SqliteSessionRepository
+from app.services.auth_service import AuthService
+
+# 在任何 monkeypatch 之前捕获原始引用：路由里的 ``Depends(get_settings)``
+# 绑定的是这个函数对象，替换模块属性对它无效，因此 dependency_overrides
+# 必须用同一个对象作 key 才命中。
+_ORIGINAL_GET_SETTINGS = app.config.get_settings
 from app.tools import registry as global_registry
 from app.tools.registry import ToolRegistry
 from stubs import SHEET_MAIN, SHEET_SUMMARY
@@ -51,7 +62,64 @@ def settings(tmp_path: Path) -> Settings:
         max_agent_steps=6,
         max_tool_output_chars=2000,
         max_upload_bytes=10 * 1024 * 1024,
+        # 默认关闭认证：绝大多数测试关心的是业务逻辑而非登录。
+        # 需要验证认证本身的用例通过 auth_settings 夹具单独开启。
+        auth_enabled=False,
     )
+
+
+@pytest.fixture
+def auth_settings(settings: Settings) -> Settings:
+    """开启认证的测试配置。口令迭代数压到 1000 以提速（生产用 600_000）。
+
+    注意：仅是**一个 Settings 实例**。要让被测代码读到它，仍需由
+    ``auth_client`` 或 ``patch_settings`` 把各模块的 get_settings 指过来。
+    """
+    return settings.model_copy(
+        update={
+            "auth_enabled": True,
+            "auth_admin_username": "admin",
+            "auth_admin_password": "admin-pass-123",
+            "auth_password_iterations": 1000,
+        }
+    )
+
+
+@pytest.fixture
+def patch_settings(monkeypatch: pytest.MonkeyPatch):
+    """把各模块的 ``get_settings`` 指向指定 Settings。
+
+    ``isolate_settings`` 已经把 autouse 装成了 ``settings``；认证用例需要
+    换成 ``auth_settings``，但不能破坏其他 autouse 夹具的顺序，因此单独
+    提供一个可复用的切换器。
+    """
+    get_settings_func = _ORIGINAL_GET_SETTINGS
+
+    def _apply(target: Settings) -> None:
+        from app.main import app as fastapi_app
+
+        for module in (
+            app.config,
+            app.main,
+            app.audit,
+            app.tools.base,
+            app.storage.session_store,
+            app.agent.loop,
+            app.dependencies,
+            app.routers.auth,
+            app.routers.sessions,
+            app.routers.files,
+            app.routers.chat,
+            app.routers.chat_stream,
+        ):
+            if hasattr(module, "get_settings"):
+                monkeypatch.setattr(module, "get_settings", lambda: target, raising=False)
+        # 关键：``Depends(get_settings)`` 在装饰时就绑定了函数对象，
+        # 替换模块属性对它无效。必须走 dependency_overrides 才覆盖得到。
+        # （生产环境只有一个 settings 实例，所以这不是 bug；但测试要换配置就必须走这条）
+        fastapi_app.dependency_overrides[get_settings_func] = lambda: target
+
+    return _apply
 
 
 @pytest.fixture(autouse=True)
@@ -69,10 +137,33 @@ def isolate_settings(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Ite
         app.storage.session_store,
         app.agent.loop,
         app.dependencies,
+        # 路由层也各自绑定了 get_settings（归属校验、Cookie 属性都读它）
+        app.routers.auth,
+        app.routers.sessions,
+        app.routers.files,
+        app.routers.chat,
+        app.routers.chat_stream,
     ):
         if hasattr(module, "get_settings"):
             monkeypatch.setattr(module, "get_settings", lambda: settings, raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def clear_auth_cache() -> Iterator[None]:
+    """清掉 ``get_auth_service`` 的 lru_cache。
+
+    它是进程级单例，会把**第一次**用到的 settings 一直留着。不清的话，
+    「认证关闭」的测试会拿到「认证开启」的 service（或反过来），而且
+    跨用例污染 db_path。
+    """
+    from app.dependencies import get_auth_service
+
+    get_auth_service.cache_clear()
+    try:
+        yield
+    finally:
+        get_auth_service.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +206,46 @@ def store(settings: Settings) -> SessionStore:
     """注入指向 tmp_path 的 repository，确保测试不碰真实 data/agent.db。"""
     repo = SqliteSessionRepository(settings.db_path)
     return SessionStore(root=settings.upload_dir, repo=repo)
+
+
+@pytest.fixture
+def auth_store(auth_settings: Settings) -> SessionStore:
+    """认证开启场景的 store（owner_id 会被真正校验）。"""
+    repo = SqliteSessionRepository(auth_settings.db_path)
+    return SessionStore(root=auth_settings.upload_dir, repo=repo)
+
+
+@pytest.fixture
+def auth_service(auth_settings: Settings, patch_settings) -> AuthService:
+    """认证开启的 AuthService（含初始管理员引导）。"""
+    from app.storage.sqlite_auth_repo import SqliteAuthRepository
+
+    patch_settings(auth_settings)
+    service = AuthService(
+        auth_settings, repo=SqliteAuthRepository(auth_settings.db_path)
+    )
+    service.bootstrap_admin()
+    return service
+
+
+@pytest.fixture
+def auth_client(auth_settings, auth_service, auth_store, patch_settings, make_agent):
+    """一个**认证开启**的 TestClient。
+
+    做法：把认证涉及模块的 ``get_settings`` 全部指向 auth_settings，
+    并用 dependency_overrides 注入 auth_service / auth_store。
+    """
+    from app.dependencies import get_agent, get_auth_service, get_store
+    from app.main import app as fastapi_app
+
+    patch_settings(auth_settings)
+    fastapi_app.dependency_overrides[get_store] = lambda: auth_store
+    fastapi_app.dependency_overrides[get_auth_service] = lambda: auth_service
+    fastapi_app.dependency_overrides[get_agent] = lambda: make_agent()
+
+    with TestClient(fastapi_app) as client:
+        yield client
+    fastapi_app.dependency_overrides.clear()
 
 
 @pytest.fixture

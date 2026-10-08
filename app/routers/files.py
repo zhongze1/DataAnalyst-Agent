@@ -7,12 +7,30 @@ import logging
 from fastapi import APIRouter, Depends, File, UploadFile
 
 from app.context import set_session_id
-from app.dependencies import get_store
+from app.config import get_settings
+from app.dependencies import get_store, require_user
 from app.errors import SessionNotFoundError
 from app.schemas import ERROR_RESPONSES, FileInfo, UploadResponse
+from app.storage.repository import UserRecord
 from app.storage.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
+
+_ = get_settings
+
+
+def _owns(session, user) -> bool:
+    """会话归属校验。
+
+    认证关闭时不做限制（本机模式）；开启后只有 owner 相同才算自己的。
+    校验失败一律按「不存在」处理 —— 返回 403 等于告诉对方「这个 id 存在」。
+    """
+    settings = get_settings()
+    if not settings.auth_enabled:
+        return session is not None
+    if session is None:
+        return False
+    return session.owner_id == (user.user_id if user else None)
 
 router = APIRouter(prefix="/api/files", tags=["files"], responses=ERROR_RESPONSES)
 
@@ -20,6 +38,7 @@ router = APIRouter(prefix="/api/files", tags=["files"], responses=ERROR_RESPONSE
 @router.post("/upload", response_model=UploadResponse)
 async def upload_excel(
     file: UploadFile = File(..., description="Excel 文件（.xlsx/.xlsm）"),
+    user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> UploadResponse:
     """上传 Excel，返回 session_id 与工作表列表。后续提问都带这个 session_id。
@@ -30,7 +49,11 @@ async def upload_excel(
     content = await file.read()
     # 抛出的 FileTypeError / FileEmptyError / FileTooLargeError / FileParseError
     # 会被全局处理器接住，这里不需要 try/except
-    session = store.create(file.filename or "upload.xlsx", content)
+    session = store.create(
+        file.filename or "upload.xlsx",
+        content,
+        owner_id=user.user_id if user else None,
+    )
 
     set_session_id(session.session_id)
     logger.info(
@@ -56,11 +79,12 @@ async def upload_excel(
 @router.get("/{session_id}", response_model=FileInfo)
 async def get_file_info(
     session_id: str,
+    user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> FileInfo:
     """查询某个会话的文件信息（刷新页面后可用来恢复上下文）。"""
     session = store.get(session_id)
-    if session is None:
+    if not _owns(session, user):
         raise SessionNotFoundError()
     return FileInfo(
         session_id=session.session_id,
@@ -73,10 +97,11 @@ async def get_file_info(
 @router.delete("/{session_id}")
 async def delete_session(
     session_id: str,
+    user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> dict[str, bool]:
     session = store.get(session_id)
-    if session is None:
+    if not _owns(session, user):
         raise SessionNotFoundError("会话不存在")
     store.delete(session_id)
     logger.info("会话已删除 | %s", session_id, extra={"deleted_session_id": session_id})

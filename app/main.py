@@ -43,7 +43,7 @@ from app.errors import AppError, ConfigError
 from app.logging_setup import setup_logging
 from app.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
 from app.storage.migrate import migrate_meta_files
-from app.routers import chat, chat_stream, files, sessions
+from app.routers import auth, chat, chat_stream, files, sessions
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +166,22 @@ async def lifespan(app: FastAPI):
     except Exception:  # 迁移失败不应阻止启动
         logger.warning("历史会话迁移失败", exc_info=True)
 
+    # 认证引导：首次启动创建初始管理员，并把无主的历史会话认领给他
+    if settings.auth_enabled:
+        try:
+            from app.dependencies import get_auth_service
+
+            auth = get_auth_service()
+            admin = auth.bootstrap_admin()
+            if admin is not None:
+                claimed = store.claim_orphan_sessions(admin.user_id)
+                if claimed:
+                    logger.info("已把 %d 个历史会话归属给管理员 %s", claimed, admin.username)
+        except Exception:  # 引导失败不应阻止启动，但必须留痕
+            logger.exception("认证引导失败")
+    else:
+        logger.warning("认证已关闭（auth_enabled=false）：任何人都可访问本服务，仅限本机开发")
+
     logger.info("运行时配置 | %s", runtime_summary(settings))
     logger.info(
         "已恢复 %d 个历史会话 | 会话目录: %s", len(store.list_sessions()), settings.upload_dir
@@ -187,6 +203,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     app.include_router(files.router)
+    app.include_router(auth.router)
     app.include_router(chat.router)
     app.include_router(chat_stream.router)
     app.include_router(sessions.router)

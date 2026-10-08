@@ -19,9 +19,10 @@ from fastapi.responses import StreamingResponse
 from app.agent.events import error_event, done_event
 from app.agent.loop import DataAnalystAgent
 from app.context import set_session_id
-from app.dependencies import get_agent, get_store
+from app.dependencies import get_agent, get_store, require_user
 from app.errors import SessionNotFoundError
 from app.schemas import ChatRequest
+from app.storage.repository import UserRecord
 from app.storage.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ _SENTINEL = object()
 async def chat_stream(
     payload: ChatRequest,
     agent: DataAnalystAgent = Depends(get_agent),
+    user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> StreamingResponse:
     """以 SSE 推送：开始 → 工具步骤 → 答案增量 → 收尾快照。"""

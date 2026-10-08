@@ -55,6 +55,30 @@ class HealthResponse(BaseModel):
     model: str
 
 
+# ----------------------------------------------------------------- 认证
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class CreateUserRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=8, max_length=256)
+    role: str = Field(default="analyst")
+
+
+class UserInfo(BaseModel):
+    user_id: str
+    username: str
+    display_name: str = ""
+    role: str = "analyst"
+
+
 # ----------------------------------------------------------------- 会话历史
 class SessionSummary(BaseModel):
     """历史会话列表项（不含完整对话，避免列表响应过大）。"""

@@ -127,9 +127,13 @@ class SessionStore:
                 session.messages = loaded
         return session
 
-    def list_sessions(self) -> list[Session]:
-        """历史会话列表，按最近活跃倒序。走数据库，不扫目录。"""
-        records = self._repo.list_sessions()
+    def list_sessions(self, owner_id: str | None = None) -> list[Session]:
+        """历史会话列表，按最近活跃倒序。走数据库，不扫目录。
+
+        ``owner_id`` 为 None 表示不过滤（认证关闭的本机模式）；开启认证后
+        调用方必须传当前用户 id，否则会看到别人的会话。
+        """
+        records = self._repo.list_sessions(owner_id=owner_id)
         previews = self._repo.last_user_messages([r.session_id for r in records])
         sessions: list[Session] = []
         for record in records:
@@ -142,8 +146,11 @@ class SessionStore:
         return sessions
 
     # ------------------------------------------------------------- 写入
-    def create(self, filename: str, content: bytes) -> Session:
-        """落盘一份上传文件并在数据库建立会话。"""
+    def create(self, filename: str, content: bytes, owner_id: str | None = None) -> Session:
+        """落盘一份上传文件并在数据库建立会话。
+
+        ``owner_id`` 在认证开启时由路由层从当前登录用户传入。
+        """
         settings = get_settings()
         suffix = Path(filename).suffix.lower()
         if suffix not in settings.allowed_suffixes:
@@ -181,6 +188,7 @@ class SessionStore:
             created_at=now,
             updated_at=now,
             turn_count=0,
+            owner_id=owner_id,
         )
         try:
             self._repo.upsert_session(record)
@@ -210,6 +218,19 @@ class SessionStore:
         session.turn_count = turn_count
         session.updated_at = utc_now()
         self._repo.upsert_session(_to_record(session))
+
+    def claim_orphan_sessions(self, owner_id: str) -> int:
+        """把无主会话归给指定用户，并**同步刷新内存缓存**。
+
+        必须走 store 而不是直接调 repo：``get()`` 命中缓存时不会重读数据库，
+        只改库会导致缓存里的 owner_id 一直是旧值（认证过滤随之失效）。
+        """
+        claimed = self._repo.claim_orphan_sessions(owner_id)
+        if claimed:
+            for session in self._cache.values():
+                if not session.owner_id:
+                    session.owner_id = owner_id
+        return claimed
 
     def reset_messages(self, session: Session) -> None:
         """清空对话历史（保留已上传的数据与文件）。"""
