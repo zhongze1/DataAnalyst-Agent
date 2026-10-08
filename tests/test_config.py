@@ -31,6 +31,9 @@ def _settings(tmp_path: Path, **overrides: Any) -> Settings:
         "llm_base_url": "https://api.deepseek.com/v1",
         "llm_model": "deepseek-chat",
         "upload_dir": tmp_path / "uploads",
+        # 本文件只测 LLM/上传相关规则。认证默认关闭，免得每个用例都要
+        # 配齐管理员账号；认证规则由 test_auth.py 单独覆盖。
+        "auth_enabled": False,
     }
     values.update(overrides)
     return Settings(**values)
@@ -186,3 +189,75 @@ def test_lifespan_starts_when_problems_tolerated(
 
     with TestClient(app) as client:
         assert client.get("/api/health").status_code == 200
+
+# ---------------------------------------------------------------- 认证配置
+def test_auth_disabled_needs_no_admin_account(tmp_path: Path) -> None:
+    """免登录模式下不要求管理员账号 —— 否则本机开发必须先配一堆东西。"""
+    assert validate_settings(_settings(tmp_path, auth_enabled=False)) == []
+
+
+def test_auth_enabled_requires_admin_username(tmp_path: Path) -> None:
+    problems = validate_settings(
+        _settings(tmp_path, auth_enabled=True, auth_admin_username="")
+    )
+    assert any(p.key == "AGENT_AUTH_ADMIN_USERNAME" for p in problems)
+
+
+def test_auth_enabled_requires_admin_password(tmp_path: Path) -> None:
+    problems = validate_settings(
+        _settings(tmp_path, auth_enabled=True, auth_admin_password="")
+    )
+    assert any(p.key == "AGENT_AUTH_ADMIN_PASSWORD" for p in problems)
+
+
+def test_short_admin_password_is_rejected(tmp_path: Path) -> None:
+    problems = validate_settings(
+        _settings(
+            tmp_path,
+            auth_enabled=True,
+            auth_admin_username="admin",
+            auth_admin_password="short",
+        )
+    )
+    assert any("过短" in p.message for p in problems)
+
+
+def test_low_password_iterations_is_rejected(tmp_path: Path) -> None:
+    """迭代数过低会削弱所有用户的口令抗暴力破解能力，必须挡住。"""
+    problems = validate_settings(
+        _settings(
+            tmp_path,
+            auth_enabled=True,
+            auth_admin_username="admin",
+            auth_admin_password="admin-pass-123",
+            auth_password_iterations=1000,
+        )
+    )
+    assert any(p.key == "AGENT_AUTH_PASSWORD_ITERATIONS" for p in problems)
+
+
+def test_non_positive_session_ttl_is_rejected(tmp_path: Path) -> None:
+    problems = validate_settings(
+        _settings(
+            tmp_path,
+            auth_enabled=True,
+            auth_admin_username="admin",
+            auth_admin_password="admin-pass-123",
+            auth_session_ttl_hours=0,
+        )
+    )
+    assert any(p.key == "AGENT_SESSION_TTL_HOURS" for p in problems)
+
+
+def test_properly_configured_auth_passes(tmp_path: Path) -> None:
+    assert (
+        validate_settings(
+            _settings(
+                tmp_path,
+                auth_enabled=True,
+                auth_admin_username="admin",
+                auth_admin_password="admin-pass-123",
+            )
+        )
+        == []
+    )

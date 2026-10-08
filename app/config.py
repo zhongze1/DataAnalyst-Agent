@@ -110,6 +110,49 @@ def validate_settings(settings: Settings) -> list[ConfigProblem]:
     """
     problems: list[ConfigProblem] = []
 
+    # ---- 认证 ----
+    if settings.auth_enabled:
+        if not settings.auth_admin_username.strip():
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_AUTH_ADMIN_USERNAME",
+                    message="已开启认证但未配置初始管理员用户名",
+                    hint="首次启动需要它来创建管理员；或设 AGENT_AUTH_ENABLED=false 免登录",
+                )
+            )
+        if not settings.auth_admin_password:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_AUTH_ADMIN_PASSWORD",
+                    message="已开启认证但未配置初始管理员口令",
+                    hint="至少 8 个字符；或设 AGENT_AUTH_ENABLED=false 免登录",
+                )
+            )
+        elif len(settings.auth_admin_password) < 8:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_AUTH_ADMIN_PASSWORD",
+                    message="初始管理员口令过短（至少 8 个字符）",
+                    hint="口令太短等于没设",
+                )
+            )
+        if settings.auth_session_ttl_hours <= 0:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_SESSION_TTL_HOURS",
+                    message="登录态有效期必须为正整数",
+                    hint="例如 12（小时）",
+                )
+            )
+        if settings.auth_password_iterations < 100_000:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_AUTH_PASSWORD_ITERATIONS",
+                    message="口令哈希迭代数过低",
+                    hint="生产环境至少 100000，推荐 600000（OWASP）",
+                )
+            )
+
     if settings.llm_provider == "openai":
         if not settings.llm_api_key.strip():
             problems.append(

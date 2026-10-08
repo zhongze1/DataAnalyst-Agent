@@ -65,6 +65,9 @@ def settings(tmp_path: Path) -> Settings:
         # 默认关闭认证：绝大多数测试关心的是业务逻辑而非登录。
         # 需要验证认证本身的用例通过 auth_settings 夹具单独开启。
         auth_enabled=False,
+        # 认证开启时 validate_settings 会要求这些字段有值，给齐以免误报
+        auth_admin_username="admin",
+        auth_admin_password="admin-pass-123",
     )
 
 
@@ -80,7 +83,10 @@ def auth_settings(settings: Settings) -> Settings:
             "auth_enabled": True,
             "auth_admin_username": "admin",
             "auth_admin_password": "admin-pass-123",
+            # 迭代数压到 1000 只为提速。validate_settings 会把它判为过低
+            # （这条规则在生产是对的），所以这里显式关闭严格校验。
             "auth_password_iterations": 1000,
+            "strict_config": False,
         }
     )
 
