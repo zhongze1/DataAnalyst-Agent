@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import ast
+import logging
+from pathlib import Path
 import builtins
 import io
 from contextlib import redirect_stdout
@@ -23,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from app.config import get_settings
+from app.storage.artifacts import save_artifact
 from app.tools.base import ToolContext, ToolError
 from app.tools.registry import tool
 
@@ -438,6 +441,8 @@ def correlation(
 
 
 # ----------------------------------------------------------------- 沙箱执行
+logger = logging.getLogger(__name__)
+
 _BANNED_NAMES = {
     "eval", "exec", "open", "compile", "input", "exit", "quit", "help",
     "globals", "locals", "vars", "getattr", "setattr", "delattr", "breakpoint",
@@ -637,4 +642,17 @@ def _run_code(ctx: ToolContext, code: str, sheet: str | None = None) -> Any:
     uses_active_frame=True,
 )
 def run_pandas(ctx: ToolContext, code: str, sheet: str | None = None) -> Any:
-    return _run_code(ctx, code, sheet)
+    value = _run_code(ctx, code, sheet)
+
+    # W2-2：把结构化结果另存一份，供「导出报告」使用。
+    # 必须在返回之前 —— Tool.run 会把返回值 format_value 成截断文本，
+    # 原始 DataFrame 之后就拿不回来了。
+    if ctx.file_path:
+        try:
+            save_artifact(
+                Path(ctx.file_path), "run_pandas", value, step=ctx.current_step
+            )
+        except Exception:  # 产物落盘失败绝不能影响分析本身
+            logger.warning("产物落盘失败（已忽略）", exc_info=True)
+
+    return value

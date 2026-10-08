@@ -47,6 +47,9 @@ class ToolContext:
     sheets: list[str] = field(default_factory=list)
     frames: dict[str, pd.DataFrame] = field(default_factory=dict)
     active_sheet: str | None = None
+    # 当前工具调用是本轮第几步（从 1 开始）。由 Agent Loop 在每次
+    # 调用工具前写入，供需要「按步骤」记录产物的工具使用。
+    current_step: int | None = None
 
     def get_frame(self, sheet: str | None = None, *, activate: bool = False) -> pd.DataFrame:
         """取出（必要时加载）某个工作表的 DataFrame。

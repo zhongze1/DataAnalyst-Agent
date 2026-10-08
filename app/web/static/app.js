@@ -24,6 +24,9 @@ const dom = {
   sendBtn: el("sendBtn"),
   stopBtn: el("stopBtn"),
   history: el("history"),
+  exportMd: el("exportMd"),
+  exportXlsx: el("exportXlsx"),
+  exportLast: el("exportLast"),
   resetBtn: el("resetBtn"),
 };
 
@@ -327,6 +330,63 @@ async function streamChat(question, sessionId, { onEvent, signal } = {}) {
   }
 }
 
+/* ---------------------------------------------------------------- 导出报告 */
+async function downloadReport(format, lastTurn) {
+  if (!state.sessionId) {
+    addMessage("assistant", `<p class="err">请先上传文件并进行分析。</p>`);
+    return;
+  }
+  const query = new URLSearchParams({ format });
+  if (lastTurn) query.set("last_turn", "true");
+  const url = `/api/sessions/${state.sessionId}/export?${query}`;
+  const label = format === "md" ? "Markdown" : "Excel";
+  try {
+    state.lastRequestId = null;
+    const response = await fetch(url, { credentials: "same-origin" });
+    if (response.status === 401) {
+      window.showLogin?.("登录状态已失效，请重新登录");
+      return;
+    }
+    if (!response.ok) {
+      let message = `导出失败（${response.status}）`;
+      try {
+        const data = await response.json();
+        message = data?.error?.message || message;
+        state.lastRequestId = data?.error?.request_id || null;
+      } catch { /* 非 JSON 响应，保留默认文案 */ }
+      addMessage("assistant", errorHtml({ message, requestId: state.lastRequestId }));
+      return;
+    }
+    // 从 Content-Disposition 取文件名（服务端已按 RFC 5987 编码中文）
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+    const filename = match ? decodeURIComponent(match[1]) : `report.${format}`;
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(objectUrl);
+
+    const count = response.headers.get("X-Artifact-Count");
+    addMessage("assistant", renderMarkdown(
+      `已导出 **${label}** 报告` +
+      (count != null ? `，含 ${count} 份数据明细` : "") + "。"
+    ));
+  } catch (err) {
+    addMessage("assistant", errorHtml(err));
+  }
+}
+
+function bindExport() {
+  dom.exportMd?.addEventListener("click", () => downloadReport("md", false));
+  dom.exportXlsx?.addEventListener("click", () => downloadReport("xlsx", false));
+  dom.exportLast?.addEventListener("click", () => downloadReport("md", true));
+}
+
 /* ---------------------------------------------------------------- 提问 */
 function renderLiveStep(payload) {
   return `<div class="step live" data-step="${payload.step}">
@@ -498,6 +558,7 @@ dom.input.addEventListener("keydown", (e) => {
 });
 
 dom.stopBtn.addEventListener("click", stopStream);
+  bindExport();
 
 dom.samples.addEventListener("click", (e) => {
   if (e.target.tagName !== "LI" || !state.sessionId) return;

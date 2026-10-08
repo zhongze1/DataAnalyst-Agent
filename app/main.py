@@ -43,7 +43,7 @@ from app.errors import AppError, ConfigError
 from app.logging_setup import setup_logging
 from app.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
 from app.storage.migrate import migrate_meta_files
-from app.routers import auth, chat, chat_stream, files, sessions
+from app.routers import auth, chat, chat_stream, export, files, sessions
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +207,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(chat_stream.router)
     app.include_router(sessions.router)
+    app.include_router(export.router)
 
     @app.get("/api/health", tags=["meta"])
     async def health() -> JSONResponse:

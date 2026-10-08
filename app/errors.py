@@ -81,6 +81,18 @@ class ConfigError(AppError):
     http_status = 500
     default_message = "服务配置不合法"
 
+class BadRequestError(AppError):
+    """请求参数不合法（缺参、格式不支持等）。
+
+    与文件类错误区分开：这类问题用户改一下输入就能解决，文案应直接说明
+    「应该传什么」。
+    """
+
+    code = "BAD_REQUEST"
+    http_status = 400
+    default_message = "请求参数不合法"
+
+
 # ----------------------------------------------------------------- 认证类
 class AuthError(AppError):
     """认证相关失败（登录态无效、账号停用等）。"""

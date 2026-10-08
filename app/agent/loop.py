@@ -290,6 +290,8 @@ class DataAnalystAgent:
                         },
                     ),
                 )
+                # 工具可能需要按步骤记录产物（如导出用的结构化结果）
+                ctx.current_step = step_no
                 started_at = time.perf_counter()
                 ok, output = await asyncio.to_thread(
                     self._tools.run, call.name, call.arguments, ctx

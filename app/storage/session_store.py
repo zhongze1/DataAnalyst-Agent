@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -250,8 +251,13 @@ class SessionStore:
             try:
                 # 只删 uploads 下的一级子目录，避免误伤用户手动放的文件
                 if folder.is_dir() and folder.parent == self._root:
+                    # 会话目录里可能有 artifacts/ 子目录，unlink 对它无效，
+                    # 会抛 IsADirectoryError 并让整个清理被 except 吞掉
                     for child in folder.glob("*"):
-                        child.unlink(missing_ok=True)
+                        if child.is_dir():
+                            shutil.rmtree(child, ignore_errors=True)
+                        else:
+                            child.unlink(missing_ok=True)
                     folder.rmdir()
             except OSError:
                 logger.warning("删除会话文件失败: %s", folder, exc_info=True)

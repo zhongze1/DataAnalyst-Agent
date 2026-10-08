@@ -57,6 +57,21 @@
       </section>
 
       <section class="block">
+        <h2>4. 导出报告</h2>
+        <div class="export-actions">
+          <button type="button" id="exportMd" class="ghost-btn">导出 Markdown</button>
+          <button type="button" id="exportXlsx" class="ghost-btn">导出 Excel</button>
+          <button type="button" id="exportLast" class="ghost-btn" title="只导出最后一轮结论">
+            仅最后一轮
+          </button>
+        </div>
+        <p class="export-hint">
+          报告含结论、执行轨迹与数据明细。数据明细来自分析时的中间结果（最多
+          2000 行 / 50 列），超限会在报告里注明。
+        </p>
+      </section>
+
+      <section class="block">
         <h2>示例问题</h2>
         <ul class="samples" id="samples">
           <li>整体数据结构是怎样的？有哪些异常值和缺失？</li>
