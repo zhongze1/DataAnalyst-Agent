@@ -435,3 +435,27 @@ def _xlsx_bytes() -> bytes:
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         pd.DataFrame({"a": [1, 2]}).to_excel(writer, sheet_name="S", index=False)
     return buffer.getvalue()
+# ============================================ Content-Type 契约（回归防护）
+def test_login_requires_json_content_type(auth_client) -> None:
+    """回归：前端若漏设 Content-Type，FastAPI 会把 body 当表单解析 → 422。
+
+    这条曾经真实发生过：登录是第一个纯 JSON POST 的接口，而通用的
+    ``api()`` 封装没有补 header（上传走 FormData 所以一直没暴露）。
+    """
+    payload = {"username": "admin", "password": "admin-pass-123"}
+    ok = auth_client.post("/api/auth/login", json=payload)
+    assert ok.status_code == 200
+
+    as_form = auth_client.post("/api/auth/login", data=payload)
+    assert as_form.status_code == 422
+    assert as_form.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_json_post_endpoints_all_accept_json_body(client, session) -> None:
+    """所有纯 JSON POST 接口都必须能用 JSON body 调通。"""
+    for path, payload in (
+        ("/api/chat", {"session_id": session.session_id, "message": "你好"}),
+        ("/api/chat/stream", {"session_id": session.session_id, "message": "你好"}),
+    ):
+        response = client.post(path, json=payload)
+        assert response.status_code == 200, f"{path} -> {response.status_code}"

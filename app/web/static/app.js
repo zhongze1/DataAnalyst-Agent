@@ -28,8 +28,23 @@ const dom = {
 };
 
 /* ---------------------------------------------------------------- 工具函数 */
+/**
+ * 统一请求封装。
+ *
+ * 必须显式声明 Content-Type：body 是 JSON 字符串时浏览器不会自动补，
+ * FastAPI 会把请求当成表单数据解析，返回 422「请求参数不合法」。
+ * （FormData 上传走浏览器自动生成的 multipart，不在此列。）
+ */
 async function api(path, options = {}) {
-  const res = await fetch(path, options);
+  const opts = { ...options };
+  const isFormData = opts.body instanceof FormData;
+  if (opts.body != null && !isFormData && !opts.skipJsonHeader) {
+    if (!opts.headers) opts.headers = {};
+    if (!Object.keys(opts.headers).some((k) => k.toLowerCase() === "content-type")) {
+      opts.headers["Content-Type"] = "application/json";
+    }
+  }
+  const res = await fetch(path, opts);
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
@@ -44,7 +59,16 @@ async function api(path, options = {}) {
   }
   if (!res.ok) {
     // 统一错误体：{error:{code,message,request_id}}；detail 兜底兼容旧格式
-    const message = data?.error?.message || data?.detail || `请求失败 (${res.status})`;
+    let message = data?.error?.message || data?.detail || `请求失败 (${res.status})`;
+    // 422 的 detail 是字段级数组，直接丢给用户等于什么都没说。
+    // 提取第一条「哪个字段错了」拼进提示，登录这类场景能一眼看出问题。
+    if (res.status === 422 && Array.isArray(data?.detail)) {
+      const first = data.detail[0];
+      if (first) {
+        const field = Array.isArray(first.loc) ? first.loc.slice(1).join(".") : "";
+        message = field ? `${message}（字段：${field}）` : message;
+      }
+    }
     const error = new Error(typeof message === "string" ? message : JSON.stringify(message));
     error.code = data?.error?.code || null;
     error.requestId = data?.error?.request_id || state.lastRequestId;
