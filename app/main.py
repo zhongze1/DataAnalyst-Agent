@@ -91,9 +91,15 @@ def register_exception_handlers(app: FastAPI) -> None:
         if exc.cause is not None:
             # 真实原因只进日志：响应体里绝不能出现 openpyxl / httpx 的内部细节
             logger.debug("异常细节", exc_info=exc.cause)
-        return JSONResponse(
+        response = JSONResponse(
             status_code=exc.http_status, content=exc.to_payload(_request_id(request))
         )
+        # 配额/并发类异常带 retry_after：只放响应头，不动错误体契约
+        # （{"error": {code, message, request_id}} 的键集是被测试锁住的契约）
+        retry_after = getattr(exc, "retry_after", None)
+        if retry_after:
+            response.headers["Retry-After"] = str(int(retry_after))
+        return response
 
     @app.exception_handler(RequestValidationError)
     async def _handle_validation(request: Request, exc: RequestValidationError) -> JSONResponse:

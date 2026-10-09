@@ -19,9 +19,10 @@ from fastapi.responses import StreamingResponse
 from app.agent.events import error_event, done_event
 from app.agent.loop import DataAnalystAgent
 from app.context import set_session_id
-from app.dependencies import get_agent, get_store, require_user
+from app.dependencies import get_agent, get_quota_service, get_store, quota_user_key, require_user
 from app.errors import SessionNotFoundError
 from app.schemas import ChatRequest
+from app.services.quota_service import QuotaService
 from app.storage.repository import UserRecord
 from app.storage.session_store import SessionStore
 
@@ -39,12 +40,24 @@ async def chat_stream(
     agent: DataAnalystAgent = Depends(get_agent),
     user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
+    quota: QuotaService = Depends(get_quota_service),
 ) -> StreamingResponse:
-    """以 SSE 推送：开始 → 工具步骤 → 答案增量 → 收尾快照。"""
+    """以 SSE 推送：开始 → 工具步骤 → 答案增量 → 收尾快照。
+
+    配额预检在**建立流之前**完成：一旦开始推流就再也改不了状态码，
+    所以超限必须在 ``StreamingResponse`` 之前抛出 —— 由全局处理器
+    转成标准 JSON 错误响应（前端已有对应分支，见 ``app.js`` 的
+    ``!response.ok`` 路径），而不是推一半再中断。
+    """
     session = store.get(payload.session_id)
     if payload.session_id and session is None:
         raise SessionNotFoundError()
     set_session_id(session.session_id if session else None)
+
+    reservation = quota.reserve(
+        user_key=quota_user_key(user),
+        session_id=session.session_id if session else None,
+    )
 
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -52,6 +65,7 @@ async def chat_stream(
         await queue.put(event)
 
     async def runner() -> None:
+        result = None
         try:
             result = await agent.run(session, payload.message, on_event=on_event)
             await queue.put(
@@ -80,6 +94,11 @@ async def chat_stream(
             await queue.put(error_event("INTERNAL_ERROR", "分析过程出错，请稍后重试"))
             _ = exc
         finally:
+            # 释放与结算都是**同步**方法：客户端断开时任务正被取消，
+            # 此处任何 await 都会立刻抛 CancelledError，导致并发泄漏、用量丢失。
+            # 同步调用不受取消影响，四条路径（正常/异常/取消/断开）一定执行到。
+            quota.release(reservation)
+            quota.settle(reservation, result.usage if result is not None else None)
             await queue.put(_SENTINEL)
 
     task = asyncio.create_task(runner())

@@ -288,11 +288,12 @@ def test_stream_and_non_stream_agree_on_steps(client, store, sample_xlsx) -> Non
 
 # ============================================================ 取消
 async def test_client_disconnect_cancels_backend_task(
-    session, store: SessionStore, make_agent
+    session, store: SessionStore, make_agent, settings
 ) -> None:
     """客户端断开后后端任务必须被取消，不能留孤儿任务继续烧 token。"""
     from app.routers.chat_stream import chat_stream
     from app.schemas import ChatRequest
+    from app.services.quota_service import QuotaService
 
     started = asyncio.Event()
     cancelled = asyncio.Event()
@@ -312,10 +313,14 @@ async def test_client_disconnect_cancels_backend_task(
             response = await self.chat(messages, tools)
             yield LLMStreamEvent(kind="done", response=response)
 
+    # 直接调用路由函数（绕过 FastAPI 依赖注入），因此需要显式给出依赖项：
+    # user=Depends(...) 与 quota=Depends(...) 的默认值在这里是「Depends 对象」而不是实例
     response = await chat_stream(
         ChatRequest(session_id=session.session_id, message="慢查询"),
         agent=make_agent(HangingLLM()),
+        user=None,
         store=store,
+        quota=QuotaService(settings),
     )
     iterator = response.body_iterator
     # 读到第一帧（start 事件）说明流已建立

@@ -17,6 +17,7 @@ from app.llm.base import LLMClient, LLMError
 from app.llm.mock_client import MockLLMClient
 from app.llm.openai_client import OpenAICompatClient
 from app.services.auth_service import AuthService
+from app.services.quota_service import LOCAL_USER_KEY, QuotaService
 from app.storage.repository import UserRecord
 from app.storage.session_store import SessionStore
 from app.tools import registry  # 触发 pandas_tools 的工具注册
@@ -51,6 +52,28 @@ def get_agent() -> DataAnalystAgent:
 @lru_cache
 def get_auth_service() -> AuthService:
     return AuthService(get_settings())
+
+
+@lru_cache
+def get_quota_service() -> QuotaService:
+    """进程级配额单例。
+
+    **必须**是单例：分钟窗口与当前并发都是进程内状态，每次请求新建一个
+    QuotaService 等于没有限流。（测试里要用 ``cache_clear`` 隔离，见 conftest。）
+    """
+    return QuotaService(get_settings())
+
+
+def quota_user_key(user: UserRecord | None) -> str:
+    """把当前用户翻译成配额键。
+
+    认证关闭时返回**固定的本机键**，而不是跳过限流：
+    本机模式同样可能被脚本疯狂调用，同样要保护 LLM 费用。
+    """
+    settings = get_settings()
+    if not settings.auth_enabled or user is None:
+        return LOCAL_USER_KEY
+    return user.user_id
 
 
 def read_token(request: Request) -> str | None:

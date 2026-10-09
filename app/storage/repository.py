@@ -76,6 +76,27 @@ class MessageRecord:
 
 
 @dataclass
+class DailyUsageRecord:
+    """某个用户在某一天（配额时区下的自然日）的用量。
+
+    既承载**硬配额**（``requests``），也承载**统计**（token 用量）。
+    两者放在一行是为了避免两次写入，且它们的生命周期完全一致。
+    """
+
+    user_key: str
+    day: str
+    requests: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    # 回报了 usage 的模型调用轮次
+    usage_reported_calls: int = 0
+    # 未回报 usage 的轮次。厂商没给就不给，**不估算、不伪装成精确值**
+    usage_missing_calls: int = 0
+    updated_at: str = ""
+
+
+@dataclass
 class UserRecord:
     """用户。``password_hash`` 用 :mod:`app.security.passwords` 的编码格式。"""
 
@@ -167,4 +188,39 @@ class SessionRepository(Protocol):
 
     def last_user_messages(self, session_ids: list[str]) -> dict[str, str]:
         """批量取每个会话最后一条用户提问的摘要（历史列表用，避免 N+1 查询）。"""
+        ...
+
+
+@runtime_checkable
+class QuotaRepository(Protocol):
+    """配额与用量的持久化接口（DA-017）。
+
+    只负责「每日计数」这一类的读写；分钟窗口与当前并发属于进程内状态，
+    不进这里 —— 它们是短期、可容忍重启清零的量。
+    """
+
+    def get_daily(self, user_key: str, day: str) -> DailyUsageRecord | None:
+        """取某用户某自然日的用量记录，没有则返回 None。"""
+        ...
+
+    def increment_requests(self, user_key: str, day: str) -> int:
+        """当日请求数 +1 并返回**自增后**的值。
+
+        必须是单向自增：调用方据此判断是否超限，
+        若先读后写，两个并发请求会同时读到同一个旧值。
+        """
+        ...
+
+    def add_tokens(
+        self,
+        user_key: str,
+        day: str,
+        *,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        reported_calls: int = 0,
+        missing_calls: int = 0,
+    ) -> None:
+        """累加 token 用量与「是否回报 usage」的轮次统计。"""
         ...

@@ -101,3 +101,34 @@ def record_tool_call(
             "error_code": error_code,
         }
     )
+
+
+def record_quota_event(
+    *,
+    event: str,
+    dimension: str,
+    user_key: str,
+    limit: int | None = None,
+    retry_after: int | None = None,
+    usage: dict[str, Any] | None = None,
+) -> None:
+    """记录一次配额事件（DA-017）：拒绝或用量结算。
+
+    与工具审计同样的隐私约束：只记**维度、上限、轮次**这类结构信息，
+    ``user_key`` 是内部用户 id（本机模式为 ``"local"``），
+    不记提示词、口令、Cookie 或任何业务数据原文。
+    """
+    if not get_settings().audit_enabled:
+        return
+    get_audit_logger().record(
+        {
+            "event": event,
+            "request_id": current_request_id(),
+            "session_id": current_session_id(),
+            "user_key": user_key,
+            "dimension": dimension,
+            "limit": limit,
+            "retry_after": retry_after,
+            "usage": usage or None,
+        }
+    )

@@ -6,9 +6,16 @@ from fastapi import APIRouter, Depends
 
 from app.agent.loop import DataAnalystAgent
 from app.context import set_session_id
-from app.dependencies import get_agent, get_store, require_user
+from app.dependencies import (
+    get_agent,
+    get_quota_service,
+    get_store,
+    quota_user_key,
+    require_user,
+)
 from app.errors import SessionNotFoundError
 from app.schemas import ERROR_RESPONSES, ChatRequest, ChatResponse, ToolStep
+from app.services.quota_service import QuotaService
 from app.storage.session_store import SessionStore
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], responses=ERROR_RESPONSES)
@@ -20,6 +27,7 @@ async def chat(
     agent: DataAnalystAgent = Depends(get_agent),
     user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
+    quota: QuotaService = Depends(get_quota_service),
 ) -> ChatResponse:
     """单 Agent Loop 的入口：一次提问 = 一次完整的「思考 → 调工具 → 观察 → 回答」。"""
     session = store.get(payload.session_id)
@@ -29,7 +37,20 @@ async def chat(
     # 绑定会话上下文：本次请求内所有日志都会自动带上 session_id
     set_session_id(session.session_id if session else None)
 
-    result = await agent.run(session, payload.message)
+    # 配额预检必须在真正调用模型之前：被拒绝的请求不能产生任何 LLM 费用。
+    # 顺序是「会话校验 → 预检占用 → 执行 → 结算 → 释放」，无效请求不吃额度。
+    reservation = quota.reserve(
+        user_key=quota_user_key(user),
+        session_id=session.session_id if session else None,
+    )
+    try:
+        result = await agent.run(session, payload.message)
+    finally:
+        # 正常结束、抛异常、被取消都要释放，否则并发会被永久锁死
+        quota.release(reservation)
+
+    # 结算失败不影响响应（settle 内部只记日志）
+    quota.settle(reservation, result.usage)
     return ChatResponse(
         session_id=session.session_id if session else (payload.session_id or ""),
         answer=result.answer,

@@ -173,6 +173,23 @@ def clear_auth_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def clear_quota_cache() -> Iterator[None]:
+    """清掉 ``get_quota_service`` 的 lru_cache（DA-017）。
+
+    与 ``clear_auth_cache`` 同理：它把**第一次**用到的 settings 一直留着，
+    不清的话配额状态（分钟窗口、当前并发、每日计数）会跨用例串味 ——
+    表现为「某个用例莫名其妙 429」，而且指向的是已被删除的 tmp 数据库。
+    """
+    from app.dependencies import get_quota_service
+
+    get_quota_service.cache_clear()
+    try:
+        yield
+    finally:
+        get_quota_service.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def enable_info_logging() -> Iterator[None]:
     """让 INFO 日志在测试中**真正被构造**。
 
@@ -241,17 +258,25 @@ def auth_client(auth_settings, auth_service, auth_store, patch_settings, make_ag
     做法：把认证涉及模块的 ``get_settings`` 全部指向 auth_settings，
     并用 dependency_overrides 注入 auth_service / auth_store。
     """
-    from app.dependencies import get_agent, get_auth_service, get_store
+    from app.dependencies import get_agent, get_auth_service, get_quota_service, get_store
     from app.main import app as fastapi_app
+    from app.services.quota_service import QuotaService
+    from app.storage.sqlite_quota_repo import SqliteQuotaRepository
 
     patch_settings(auth_settings)
     fastapi_app.dependency_overrides[get_store] = lambda: auth_store
     fastapi_app.dependency_overrides[get_auth_service] = lambda: auth_service
     fastapi_app.dependency_overrides[get_agent] = lambda: make_agent()
+    quota_repo = SqliteQuotaRepository(auth_settings.db_path)
+    quota = QuotaService(auth_settings, repo=quota_repo)
+    fastapi_app.dependency_overrides[get_quota_service] = lambda: quota
 
-    with TestClient(fastapi_app) as client:
-        yield client
-    fastapi_app.dependency_overrides.clear()
+    try:
+        with TestClient(fastapi_app) as client:
+            yield client
+    finally:
+        fastapi_app.dependency_overrides.clear()
+        quota_repo.close()
 
 
 @pytest.fixture
@@ -303,13 +328,24 @@ def make_agent(store: SessionStore, settings: Settings):
 
 
 @pytest.fixture
-def make_client(store: SessionStore, make_agent):
+def make_client(store: SessionStore, make_agent, settings: Settings):
     """构造绑定了测试依赖的 TestClient，用例结束后自动还原。"""
     created: list[TestClient] = []
+    quota_repos: list[Any] = []
 
     def _make(llm: Any = None, **agent_overrides: Any) -> TestClient:
+        from app.dependencies import get_quota_service
+        from app.services.quota_service import QuotaService
+        from app.storage.sqlite_quota_repo import SqliteQuotaRepository
+
         fastapi_app.dependency_overrides[get_store] = lambda: store
         fastapi_app.dependency_overrides[get_agent] = lambda: make_agent(llm, **agent_overrides)
+        # 配额服务必须是**同一个实例**（分钟窗口与并发都是进程内状态），
+        # 所以这里闭包捕获一个实例，而不是让 FastAPI 每次请求新建
+        repo = SqliteQuotaRepository(settings.db_path)
+        quota = QuotaService(settings, repo=repo)
+        quota_repos.append(repo)
+        fastapi_app.dependency_overrides[get_quota_service] = lambda: quota
         client = TestClient(fastapi_app)
         created.append(client)
         return client
@@ -320,6 +356,10 @@ def make_client(store: SessionStore, make_agent):
         fastapi_app.dependency_overrides.clear()
         for client in created:
             client.close()
+        # 显式关连接：否则每个用例都会漏一个 sqlite 句柄，
+        # 全量跑完会在 GC 时刷出一屏 ResourceWarning
+        for repo in quota_repos:
+            repo.close()
 
 
 @pytest.fixture

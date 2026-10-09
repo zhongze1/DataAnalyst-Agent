@@ -62,6 +62,40 @@ def _as_steps(steps: list[ToolStep]) -> list[dict[str, Any]]:
     ]
 
 
+USAGE_TOKEN_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _merge_usage(acc: dict[str, Any], raw: dict[str, Any]) -> None:
+    """把一次模型调用的 usage 累加进 ``acc``（原地修改）。
+
+    只累加**确实出现且是非负整数**的 token 字段：厂商给字符串、浮点或
+    干脆不给，都视为「没有这个字段」。宁可少算，也不把估算值
+    伪装成精确 usage —— 费用口径失真比少几个数字危险得多。
+    """
+    for key in USAGE_TOKEN_KEYS:
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        acc[key] = acc.get(key, 0) + max(0, value)
+
+
+def _finalize_usage(acc: dict[str, Any], calls: int, missing: int) -> dict[str, Any]:
+    """收尾成对外可见的 usage。
+
+    一轮 usage 都没拿到时返回 ``{}``（``usage or None`` 之后前端仍显示「暂无用量」，
+    与改造前完全一致，不改变既有契约）；只要有一轮回报过，就带上轮次统计，
+    让调用方知道这份数字的**完整度**。
+    """
+    if not acc:
+        return {}
+    return {
+        **acc,
+        "calls": calls,
+        "usage_reported_calls": calls - missing,
+        "usage_missing_calls": missing,
+    }
+
+
 async def _emit(on_event: EventEmitter | None, event: AgentEvent) -> None:
     """发送一个事件；没人在听时静默跳过。"""
     if on_event is None:
@@ -225,7 +259,11 @@ class DataAnalystAgent:
         working: list[dict[str, Any]] = [{"role": "system", "content": system}, *session.messages]
 
         steps: list[ToolStep] = []
-        usage: dict[str, Any] = {}
+        # 用量必须**逐轮累加**：改造前只保留最后一次模型调用的 usage，
+        # 而一次提问往往要调用 3~12 轮模型，核算费用时会严重少算
+        usage_acc: dict[str, Any] = {}
+        model_calls = 0
+        usage_missing = 0
         stop_reason = "max_steps"
 
         for turn in range(1, self._settings.max_agent_steps + 1):
@@ -250,6 +288,8 @@ class DataAnalystAgent:
                         ),
                         steps=steps,
                         stop_reason="llm_error",
+                        # 失败前已经花掉的用量也要如实上报，不能因为它失败了就吞掉
+                        usage=_finalize_usage(usage_acc, model_calls, usage_missing),
                     ),
                     started,
                     session,
@@ -257,7 +297,11 @@ class DataAnalystAgent:
                     question,
                 )
 
-            usage = response.usage or usage
+            model_calls += 1
+            if response.usage:
+                _merge_usage(usage_acc, response.usage)
+            else:
+                usage_missing += 1
             working.append(response_to_assistant_message(response))
 
             if not response.has_tool_calls:
@@ -267,7 +311,7 @@ class DataAnalystAgent:
                         answer=response.content or "（模型未返回文本内容）",
                         steps=steps,
                         stop_reason="final",
-                        usage=usage,
+                        usage=_finalize_usage(usage_acc, model_calls, usage_missing),
                     ),
                     started,
                     session,
@@ -352,6 +396,12 @@ class DataAnalystAgent:
                     }
                 ]
             )
+            # 收尾调用同样真实产生费用，必须一起计入，否则每轮触顶的会话都会少算一轮
+            model_calls += 1
+            if final.usage:
+                _merge_usage(usage_acc, final.usage)
+            else:
+                usage_missing += 1
             answer = final.content or "已达到最大调用次数，无法完成分析。"
             session.messages = working[1:]
         except LLMError as exc:  # pragma: no cover
@@ -360,7 +410,12 @@ class DataAnalystAgent:
             session.messages = working[1 : 1 + len(session.messages)]
 
         return self._finish(
-            AgentResult(answer=answer, steps=steps, stop_reason=stop_reason, usage=usage),
+            AgentResult(
+                answer=answer,
+                steps=steps,
+                stop_reason=stop_reason,
+                usage=_finalize_usage(usage_acc, model_calls, usage_missing),
+            ),
             started,
             session,
             _as_steps(steps),

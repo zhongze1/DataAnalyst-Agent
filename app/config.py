@@ -81,6 +81,21 @@ class Settings(BaseSettings):
     # SQLite 单文件；换 PostgreSQL 时改这里 + 换 repository 实现
     db_path: Path = DATA_DIR / "agent.db"
 
+    # ---- 配额与并发（DA-017）----
+    # 只支持单进程部署：分钟窗口与并发占用是**进程内**状态，不跨 worker 共享。
+    # 每日计数与 token 用量落 SQLite（需跨重启保留）。
+    quota_enabled: bool = True
+    # 每日额度的自然日边界与提示文案都按此时区计算；解析失败只告警并回退 UTC
+    quota_timezone: str = "Asia/Shanghai"
+    quota_user_per_minute: int = 10
+    quota_user_per_day: int = 50
+    quota_session_per_minute: int = 5
+    quota_max_concurrency_per_user: int = 1
+    # 全局最大并发：同时最多跑几个 Agent 请求
+    quota_max_concurrency_global: int = 4
+    # 并发类拒绝（用户并发 / 全局繁忙）建议客户端等待的秒数
+    quota_retry_after_seconds: int = 5
+
     # ---- 审计 ----
     # 工具调用审计（JSONL），与日志分开：日志给运维看，审计给合规看
     audit_dir: Path = DATA_DIR / "audit"
@@ -215,6 +230,53 @@ def validate_settings(settings: Settings) -> list[ConfigProblem]:
                 hint="至少需要 .xlsx",
             )
         )
+
+    # ---- 配额（DA-017）----
+    # 全部有默认值：老 .env 不新增任何必填项，升级后不会因校验失败起不来
+    if settings.quota_enabled:
+        for key, value, label in (
+            ("AGENT_QUOTA_USER_PER_MINUTE", settings.quota_user_per_minute, "每用户每分钟请求上限"),
+            ("AGENT_QUOTA_USER_PER_DAY", settings.quota_user_per_day, "每用户每日请求上限"),
+            (
+                "AGENT_QUOTA_SESSION_PER_MINUTE",
+                settings.quota_session_per_minute,
+                "每会话每分钟请求上限",
+            ),
+            (
+                "AGENT_QUOTA_MAX_CONCURRENCY_PER_USER",
+                settings.quota_max_concurrency_per_user,
+                "每用户并发上限",
+            ),
+            (
+                "AGENT_QUOTA_MAX_CONCURRENCY_GLOBAL",
+                settings.quota_max_concurrency_global,
+                "全局并发上限",
+            ),
+            (
+                "AGENT_QUOTA_RETRY_AFTER_SECONDS",
+                settings.quota_retry_after_seconds,
+                "建议等待秒数",
+            ),
+        ):
+            if value < 1:
+                problems.append(
+                    ConfigProblem(
+                        key=key,
+                        message=f"{label}必须 >= 1，当前 {value}",
+                        hint="设为 0 或负数会让所有请求都被拒绝，通常不是本意",
+                    )
+                )
+        if settings.quota_user_per_minute > settings.quota_user_per_day:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_QUOTA_USER_PER_MINUTE",
+                    message=(
+                        f"每分钟上限({settings.quota_user_per_minute})"
+                        f"大于每日上限({settings.quota_user_per_day})"
+                    ),
+                    hint="这会让每日额度在一分钟内就被耗尽，通常是两个值写反了",
+                )
+            )
 
     problems.extend(_check_upload_dir(settings.upload_dir))
     return problems

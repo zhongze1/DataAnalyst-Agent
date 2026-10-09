@@ -132,3 +132,49 @@ class PermissionDeniedError(AppError):
     code = "PERMISSION_DENIED"
     http_status = 403
     default_message = "没有权限执行该操作"
+
+
+# ----------------------------------------------------------------- 配额/并发
+class _RetryableError(AppError):
+    """带 ``retry_after`` 的错误基类。
+
+    ``retry_after`` 由全局处理器写进 ``Retry-After`` 响应头。
+    它**不进响应体**：``{"error": {...}}`` 的键集是既有契约
+    （见 ``tests/test_errors.py``），扩展它会破坏调用方。
+    文案里的等待时间与这个秒数由**同一个时刻**算出，保证「说的和做的一致」。
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        retry_after: int = 60,
+        cause: Exception | None = None,
+    ) -> None:
+        # 至少 1 秒：Retry-After: 0 会诱导客户端立刻重试，等于放大冲击
+        self.retry_after = max(1, int(retry_after))
+        super().__init__(message, cause=cause)
+
+
+class QuotaExceededError(_RetryableError):
+    """请求次数超出配额（分钟窗口或每日额度）。"""
+
+    code = "QUOTA_EXCEEDED"
+    http_status = 429
+    default_message = "请求过于频繁，请稍后重试"
+
+
+class TooManyConcurrentError(_RetryableError):
+    """同一用户已有分析在执行中。"""
+
+    code = "TOO_MANY_CONCURRENT"
+    http_status = 429
+    default_message = "你有一个分析正在进行，请等它结束后再提问"
+
+
+class ServerBusyError(_RetryableError):
+    """全局并发已满（服务容量保护）。"""
+
+    code = "SERVER_BUSY"
+    http_status = 429
+    default_message = "服务器当前繁忙，请稍后重试"

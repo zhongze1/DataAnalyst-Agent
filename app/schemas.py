@@ -125,5 +125,12 @@ ERROR_RESPONSES: dict[int | str, dict] = {
     400: {"model": ErrorResponse, "description": "请求不合法（文件类型/为空/无法解析）"},
     404: {"model": ErrorResponse, "description": "会话或接口不存在"},
     413: {"model": ErrorResponse, "description": "文件超过大小限制"},
+    429: {
+        "model": ErrorResponse,
+        "description": (
+            "请求过多或并发超限（QUOTA_EXCEEDED / TOO_MANY_CONCURRENT / SERVER_BUSY），"
+            "响应头带 Retry-After"
+        ),
+    },
     500: {"model": ErrorResponse, "description": "服务器内部错误"},
 }
