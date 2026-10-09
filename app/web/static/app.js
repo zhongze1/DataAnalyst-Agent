@@ -368,8 +368,13 @@ async function downloadReport(format, lastTurn) {
     anchor.download = filename;
     document.body.appendChild(anchor);
     anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(objectUrl);
+    // click() 只是排队一次导航，浏览器实际读取 blob 是异步的。同步 revoke 会让
+    // 下载静默失败（无任何报错），且该行为规范未保证、跨浏览器/版本可能翻转。
+    // 因此延后释放；anchor 的移除也放进同一批，避免第二个顺序竞争。
+    setTimeout(() => {
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+    }, 1000);
 
     const count = response.headers.get("X-Artifact-Count");
     addMessage("assistant", renderMarkdown(
@@ -558,7 +563,7 @@ dom.input.addEventListener("keydown", (e) => {
 });
 
 dom.stopBtn.addEventListener("click", stopStream);
-  bindExport();
+bindExport();
 
 dom.samples.addEventListener("click", (e) => {
   if (e.target.tagName !== "LI" || !state.sessionId) return;

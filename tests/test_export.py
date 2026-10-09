@@ -374,6 +374,38 @@ def test_export_xlsx_endpoint(client, session) -> None:
     assert response.content[:2] == b"PK"  # xlsx 是 zip
 
 
+@pytest.mark.parametrize("fmt,suffix", [("md", "-分析报告.md"), ("xlsx", "-分析报告.xlsx")])
+def test_export_response_headers_frontend_depends_on(client, session, fmt, suffix) -> None:
+    """锁定前端依赖的两个响应头。
+
+    前端 `downloadReport` 直接消费这两个头，但项目是**无构建的原生 JS、
+    没有 JS 测试基建**，所以 Python 侧是唯一的契约保护点：
+
+    - ``Content-Disposition`` 的 RFC 5987 中文文件名 —— 前端用
+      ``decodeURIComponent`` 还原（等价于这里的 ``unquote``），
+      编码一旦写错，用户下载到的就是乱码文件名
+    - ``X-Artifact-Count`` —— 前端直接把它显示成「含 N 份数据明细」，
+      若服务端改名或删除，界面会静默显示「含 undefined 份」而无人察觉
+    """
+    from urllib.parse import unquote
+
+    client.post("/api/chat", json={"session_id": session.session_id, "message": "整体情况"})
+    response = client.get(f"/api/sessions/{session.session_id}/export?format={fmt}")
+    assert response.status_code == 200
+
+    disposition = response.headers["content-disposition"]
+    assert "attachment" in disposition
+    assert "filename*=UTF-8''" in disposition
+
+    encoded = disposition.split("filename*=UTF-8''", 1)[1].split(";", 1)[0]
+    # 按 RFC 5987 解码后应还是中文后缀，而不是乱码或原始百分号串
+    assert unquote(encoded).endswith(suffix)
+
+    count = response.headers.get("X-Artifact-Count")
+    assert count is not None, "前端成功提示依赖该响应头，不能缺失"
+    assert count.isdigit(), f"产物数应为纯数字，实际为 {count!r}"
+
+
 def test_export_last_turn_flag(client, session) -> None:
     client.post("/api/chat", json={"session_id": session.session_id, "message": "第一轮"})
     client.post("/api/chat", json={"session_id": session.session_id, "message": "第二轮"})

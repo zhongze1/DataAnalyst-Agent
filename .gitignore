@@ -12,6 +12,10 @@ data/*
 # 但样本数据与其生成脚本必须入库（可复现，且防止误删）
 !data/samples/
 
+# 本地服务日志（uvicorn 的 stdout/stderr 重定向产物）
+uvicorn.out.log
+uvicorn.err.log
+
 # 测试与覆盖率产物
 .coverage
 .coverage.*
