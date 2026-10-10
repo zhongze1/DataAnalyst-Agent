@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # 并发类拒绝（用户并发 / 全局繁忙）建议客户端等待的秒数
     quota_retry_after_seconds: int = 5
 
+    # ---- 敏感字段打码（DA-015）----
+    # 只对外（界面 / 导出 / 产物）打码；喂给模型的工具输出仍是原文（双通路）
+    redact_enabled: bool = True
+    # **追加**到内置列名关键词（逗号分隔），留空表示只用内置默认集。
+    # 刻意不做"覆盖"：配错一次就把兜底规则全丢了，而且没人会发现。
+    redact_columns: str = ""
+
     # ---- 审计 ----
     # 工具调用审计（JSONL），与日志分开：日志给运维看，审计给合规看
     audit_dir: Path = DATA_DIR / "audit"

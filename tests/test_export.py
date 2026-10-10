@@ -14,7 +14,7 @@ import io
 import pandas as pd
 import pytest
 
-from app.security.redact import SENSITIVE_COLUMNS, redact_frame, redact_text
+from app.security.redact import redact_frame, redact_text
 from app.services.export_service import (
     _excel_safe,
     _sheet_title,
@@ -143,8 +143,8 @@ def test_corrupt_manifest_is_tolerated(session_file) -> None:
 
 
 # ============================================================ redact钩子
-def test_redact_is_identity_by_default(session_file) -> None:
-    """W2-4 还没做，当前必须是恒等 —— 但链路必须已经接上。
+def test_artifact_is_masked_on_save(session_file) -> None:
+    """DA-015：落盘产物必须已脱敏 —— 否则库里躺着明文。
 
     注意：整列都是数字时 pandas 会读回 int64（CSV 不带类型信息），
     所以断言用 str() 比较而不是类型比较。
@@ -152,11 +152,11 @@ def test_redact_is_identity_by_default(session_file) -> None:
     frame = pd.DataFrame({"手机号": ["13800138000"]})
     ref = save_artifact(session_file, "run_pandas", frame, step=1)
     back = load_artifact(session_file, ref)
-    assert [str(v) for v in back["手机号"]] == ["13800138000"]
+    assert [str(v) for v in back["手机号"]] == ["138****8000"]
 
 
 def test_redact_hook_is_applied_on_save(session_file, monkeypatch) -> None:
-    """加规则后，落盘产物必须已脱敏 —— 否则库里躺着明文。"""
+    """链路必须接上：钩子被调用过，产物才会是脱敏版。"""
     import app.storage.artifacts as artifacts_mod
 
     monkeypatch.setattr(
@@ -169,26 +169,30 @@ def test_redact_hook_is_applied_on_save(session_file, monkeypatch) -> None:
     assert back["城市"].tolist() == ["西安"]
 
 
-def test_redact_frame_masks_by_column_name() -> None:
-    SENSITIVE_COLUMNS.add("身份证")
-    try:
-        masked = redact_frame(pd.DataFrame({"身份证": ["1101011990..."], "城市": ["西安"]}))
-        assert masked["身份证"].tolist() == ["***"]
-        assert masked["城市"].tolist() == ["西安"]
-    finally:
-        SENSITIVE_COLUMNS.discard("身份证")
+def test_redact_frame_masks_by_column_name(monkeypatch) -> None:
+    """列名命中即打码。
+
+    用 monkeypatch 而不是直接改模块级集合：``SENSITIVE_COLUMNS`` 是全局
+    可变对象，直接 add/discard 会跨用例泄漏（默认集里就有「身份证」，
+    discard 会把它永久删掉）。
+    """
+    import app.security.redact as redact_mod
+
+    monkeypatch.setattr(redact_mod, "SENSITIVE_COLUMNS", {"证件号"})
+    masked = redact_frame(pd.DataFrame({"证件号": ["1101011990..."], "城市": ["西安"]}))
+    # 值匹配不上任何已知模式 -> 整体遮蔽（列名已声明它敏感）
+    assert masked["证件号"].tolist() == ["***"]
+    assert masked["城市"].tolist() == ["西安"]
 
 
-def test_redact_text_applies_patterns() -> None:
+def test_redact_text_applies_patterns(monkeypatch) -> None:
+    """PATTERNS 是可插拔的规则表（同样用 monkeypatch，避免清空内置规则）。"""
     import re
 
     import app.security.redact as redact_mod
 
-    redact_mod.PATTERNS.append((re.compile(r"1\d{10}"), "1**********"))
-    try:
-        assert redact_text("联系方式 13800138000") == "联系方式 1**********"
-    finally:
-        redact_mod.PATTERNS.clear()
+    monkeypatch.setattr(redact_mod, "PATTERNS", [(re.compile(r"X\d{3}"), "X***")])
+    assert redact_text("编号 X123 已登记") == "编号 X*** 已登记"
 
 
 # ============================================================ 轮次拆分

@@ -37,6 +37,7 @@ from app.agent.prompts import build_system_prompt
 from app.config import Settings, get_settings
 from app.llm.base import LLMClient, LLMError, LLMResponse
 from app.logging_setup import describe_arguments
+from app.security.redact import redact_text, redact_value
 from app.storage.session_store import Session
 from app.tools.base import ToolContext, humanize_tool_error, split_tool_error
 from app.tools.registry import ToolRegistry, registry
@@ -355,9 +356,12 @@ class DataAnalystAgent:
                     ToolStep(
                         step=len(steps) + 1,
                         tool=call.name,
-                        arguments=call.arguments,
+                        # DA-015：对外展示与落库的都是**脱敏值**（界面 steps、
+                        # SSE done 事件、导出轨迹共用这一个来源）。
+                        # 注意喂给模型的 output 仍是原文 —— 见下面 working.append
+                        arguments=redact_value(call.arguments),
                         ok=ok,
-                        result=output,
+                        result=redact_text(output),
                         error=error_text,
                     )
                 )
@@ -493,6 +497,10 @@ class DataAnalystAgent:
                 "usage": result.usage or None,
             },
         )
+        # DA-015：模型可能把手机号直接写进结论，对外的答案必须脱敏。
+        # 放在最后一步做：上面的漂移检测要拿模型**真实输出的原文**去比对提问关键词，
+        # 提前打码会把它变成误判。session.messages 里存的也仍是原文（下一轮要喂给模型）。
+        result.answer = redact_text(result.answer)
         return result
 
     # ------------------------------------------------------------------ 内部

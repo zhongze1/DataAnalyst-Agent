@@ -129,6 +129,44 @@ class UsageThenBrokenLLM(UsageLLM):
         return await super().chat(messages, tools)
 
 
+class PhoneLLM(MockLLMClient):
+    """专门制造敏感值：第 1 步用 run_pandas 造出含手机号的表，第 2 步把手机号写进结论。
+
+    用于验证 DA-015 的**双通路**：对外（steps / answer）必须脱敏，
+    而喂给模型的 tool 消息必须仍是原文，否则模型会算错。
+    ``tool_contents`` 记录模型实际看到的工具输出。
+    """
+
+    def __init__(self, phone: str = "13800138000") -> None:
+        super().__init__()
+        self.phone = phone
+        self.calls = 0
+        self.tool_contents: list[str] = []
+
+    async def chat(self, messages, tools=None) -> LLMResponse:
+        self.calls += 1
+        self.tool_contents.extend(
+            str(m.get("content") or "") for m in messages if m.get("role") == "tool"
+        )
+        if self.calls == 1:
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="phone-1",
+                        name="run_pandas",
+                        arguments={
+                            "sheet": SHEET_MAIN,
+                            "code": (
+                                "out = pd.DataFrame({'客户手机': ['13800138000']})\n"
+                                "out"
+                            ),
+                        },
+                    )
+                ]
+            )
+        return LLMResponse(content="客户 13800138000 的明细如下。")
+
+
 class BlockingLLM(MockLLMClient):
     """进入后阻塞一段时间，用来制造「请求正在执行中」的并发场景。"""
 

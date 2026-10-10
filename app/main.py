@@ -188,6 +188,11 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("认证已关闭（auth_enabled=false）：任何人都可访问本服务，仅限本机开发")
 
+    if not settings.redact_enabled:
+        logger.warning(
+            "敏感字段打码已关闭（redact_enabled=false）：界面与导出会显示原始数据值"
+        )
+
     logger.info("运行时配置 | %s", runtime_summary(settings))
     logger.info(
         "已恢复 %d 个历史会话 | 会话目录: %s", len(store.list_sessions()), settings.upload_dir

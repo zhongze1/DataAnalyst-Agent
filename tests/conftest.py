@@ -29,6 +29,7 @@ import app.routers.sessions
 import app.storage.session_store
 import app.dependencies
 import app.main
+import app.security.redact
 import app.storage.session_store
 import app.tools.base
 from app.agent.loop import DataAnalystAgent
@@ -117,6 +118,7 @@ def patch_settings(monkeypatch: pytest.MonkeyPatch):
             app.routers.files,
             app.routers.chat,
             app.routers.chat_stream,
+            app.security.redact,
         ):
             if hasattr(module, "get_settings"):
                 monkeypatch.setattr(module, "get_settings", lambda: target, raising=False)
@@ -149,6 +151,8 @@ def isolate_settings(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Ite
         app.routers.files,
         app.routers.chat,
         app.routers.chat_stream,
+        # 打码开关与关键词集合也读 settings
+        app.security.redact,
     ):
         if hasattr(module, "get_settings"):
             monkeypatch.setattr(module, "get_settings", lambda: settings, raising=False)

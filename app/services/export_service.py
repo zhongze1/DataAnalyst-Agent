@@ -203,7 +203,9 @@ def _write_trace_sheet(book, turns: list[dict[str, Any]]) -> None:
     for round_index, turn in enumerate(turns, start=1):
         for step in turn["steps"]:
             ok = bool(step.get("ok", True))
-            summary = str(step.get("error") or step.get("result") or "")
+            # DA-015：轨迹来自落库的 steps_json，可能是 DA-015 之前存下的**明文**，
+            # 导出时再脱一次（与下面「数据明细」的处理同理），否则历史会话照样泄露
+            summary = redact_text(str(step.get("error") or step.get("result") or ""))
             sheet.append(
                 [
                     round_index,
@@ -253,7 +255,8 @@ def _trace_table(steps: list[dict[str, Any]]) -> list[str]:
     ]
     for step in steps:
         ok = bool(step.get("ok", True))
-        summary = str(step.get("error") or step.get("result") or "")
+        # DA-015：同 xlsx 轨迹，历史落库的明文也要在这里兜住
+        summary = redact_text(str(step.get("error") or step.get("result") or ""))
         summary = summary.replace("|", "\\|").replace("\n", " ")[:120]
         lines.append(
             f"| {step.get('step', '')} | `{step.get('tool', '')}` "
