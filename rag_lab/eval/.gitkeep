@@ -1,0 +1,3 @@
+# 评估目录（占位）。
+# RAG-04 才在这里放入 questions.jsonl（10~20 题 + 人工标注的正确文档/文本块）
+# 与 report.md（recall@k / MRR + 逐题明细）。

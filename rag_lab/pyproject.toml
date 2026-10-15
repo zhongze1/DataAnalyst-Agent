@@ -1,0 +1,28 @@
+[project]
+name = "rag-lab"
+version = "0.1.0"
+description = "RAG 学习实验（独立子工程，与主工程 app/ 完全隔离）"
+# 不写死 3.14：留出切换到 3.12/3.13 的空间（若将来要跑需要 torch 的本地模型）。
+# 具体解释器由 `uv venv --python <版本>` 在创建环境时决定，详见 README。
+requires-python = ">=3.12"
+# RAG-01/02 零运行期依赖。RAG-03 起需要 HTTP 客户端调向量服务：
+# 用 httpx（与主工程同一款，且它的 MockTransport 让错误处理可以离线测）。
+dependencies = ["httpx>=0.27.0"]
+
+[dependency-groups]
+dev = ["pytest>=8.3.0"]
+
+# RAG-02 起改为**可安装**：命令行要能独立运行（`uv run python -m rag_lab.chunker`），
+# 后续脚本也要能直接 `import rag_lab.*`。
+# （RAG-01 用的是 `[tool.uv] package = false`，代价是模块根本没进环境 ——
+#   `python -m rag_lab.chunker` 会报 ModuleNotFoundError。）
+# 用 uv 自带的构建后端，不额外引入 hatchling 等第三方构建依赖。
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# src/ 布局：让 rag_lab 包无需安装即可 import，避免 editable install 的额外复杂度
+pythonpath = ["src"]
+addopts = "-q"

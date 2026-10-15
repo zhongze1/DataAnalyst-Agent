@@ -1,0 +1,14 @@
+# 实验自己的忽略规则（刻意不改根 .gitignore）
+# 注意：.venv/ 已被根 .gitignore 的 `.venv/` 规则在任意层级覆盖，这里再写一次只为自解释。
+
+# 运行期产物：向量索引、临时文件（不入库）
+index/
+*.tmp
+
+# 本地配置（含 API Key，绝不入库）
+.env
+
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
