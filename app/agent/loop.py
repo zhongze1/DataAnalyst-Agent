@@ -341,7 +341,7 @@ class DataAnalystAgent:
                 ok, output = await asyncio.to_thread(
                     self._tools.run, call.name, call.arguments, ctx
                 )
-                # 双通路：模型拿到带细节的原始错误（能自纠），用户拿���人话。
+                # 双通路：模型拿到带细节的原始错误（能自纠），用户拿人话。
                 # 原始错误只在这里落日志，不再进 HTTP 响应。
                 error_text: str | None = None
                 if not ok:
@@ -407,10 +407,23 @@ class DataAnalystAgent:
             else:
                 usage_missing += 1
             answer = final.content or "已达到最大调用次数，无法完成分析。"
-            session.messages = working[1:]
+            # 收尾结论必须**一起落进会话历史**：早前只写 working[1:]，而 working 里
+            # 并没有 final 这条 assistant 消息 —— 于是用户刚看到的结论在刷新/导出/
+            # 下一轮追问时全都不见了，且历史以 role=tool 结尾（部分厂商下一轮直接 400）。
+            session.messages = working[1:] + [
+                {"role": "assistant", "content": answer}
+            ]
         except LLMError as exc:  # pragma: no cover
-            # 收尾也失败：只保留用户提问，丢弃半截的工具轨迹，避免污染下一轮
-            answer = f"已达到最大调用次数，且收尾请求失败：{exc}"
+            # 收尾也失败：丢弃半截的工具轨迹，避免污染下一轮。
+            # 注意**不能**把 exc 拼进答案：它可能带着厂商端点、响应体等内部信息，
+            # 与上面 274-276 行「原始异常只进日志」的策略保持一致。
+            logger.error(
+                "收尾调用失败 | %s: %s",
+                type(exc).__name__,
+                exc,
+                extra={"error_code": "LLM_SERVICE_ERROR"},
+            )
+            answer = "已达到最大调用次数，且未能取得阶段性结论。请重试或换一种问法。"
             session.messages = working[1 : 1 + len(session.messages)]
 
         return self._finish(

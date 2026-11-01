@@ -1,12 +1,16 @@
-"""测试专用的 LLM 桩。
+"""测试专用桩与助手。
 
-全部继承 MockLLMClient —— 测试永不触碰真实模型接口。
+LLM 桩全部继承 MockLLMClient —— 测试永不触碰真实模型接口。
+知识库工件助手（DA-018）也放这里：它现造一份合成索引写进 tmp_path，
+**不依赖仓库里被 gitignore 的 ``data/knowledge/``**，让检索用例完全确定。
 放在独立模块里，避免测试文件反向 import conftest。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 from app.llm.base import LLMError, LLMResponse, LLMStreamEvent, ToolCall
 from app.llm.mock_client import MockLLMClient
@@ -58,6 +62,21 @@ class BrokenLLM(MockLLMClient):
 
     async def chat(self, messages, tools=None) -> LLMResponse:
         raise LLMError("模拟的模型故障")
+
+
+class WrapUpFailingLLM(MockLLMClient):
+    """一直要工具，直到收到「已达到最大工具调用次数」的收尾提示就抛错。
+
+    用于验证：收尾调用失败时，异常里的厂商端点等内部信息**不得**进入用户答案。
+    """
+
+    async def chat(self, messages, tools=None) -> LLMResponse:
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and "最大工具调用次数" in str(last.get("content", "")):
+            raise LLMError("调用 https://secret-endpoint.vendor.com/v1 失败")
+        return LLMResponse(
+            tool_calls=[ToolCall(id="wrap-fail", name="list_sheets", arguments={})]
+        )
 
 
 class CountingLLM(MockLLMClient):
@@ -182,3 +201,138 @@ class BlockingLLM(MockLLMClient):
             content="慢结论",
             usage={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
         )
+
+
+# ------------------------------------------------------------ 知识库工件（DA-018）
+KNOWLEDGE_DIM = 4
+
+
+def knowledge_row(
+    chunk_id: str,
+    doc_id: str,
+    section: str,
+    text: str,
+    vector: list[float] | None,
+    **extra: object,
+) -> dict[str, object]:
+    """一行合成索引。``vector=None`` 表示"这一片没有向量"（用于测降级）。"""
+    row: dict[str, object] = {
+        "chunk_id": chunk_id,
+        "doc_id": doc_id,
+        "source_path": f"corpus/{doc_id}.md",
+        "section": section,
+        "text": text,
+        "line_start": 1,
+        "line_end": 3,
+        "content_hash": f"hash-{chunk_id}",
+        "repeated_header": "",
+    }
+    if vector is not None:
+        row["vector"] = vector
+    row.update(extra)
+    return row
+
+
+# 三片语料：一片讲打码（正文里**故意**放一个真实手机号，用来验证打码与双通路），
+# 一片讲口径，一片讲架构。向量两两正交，便于把余弦结果算成人眼可核对的值。
+KNOWLEDGE_CHUNKS: list[dict[str, object]] = [
+    knowledge_row(
+        "c1",
+        "DA-015-敏感字段打码",
+        "打码规则",
+        "敏感字段打码：联系方式 13800138000 显示为 138****8000。",
+        [1.0, 0.0, 0.0, 0.0],
+    ),
+    knowledge_row(
+        "c2",
+        "指标定义",
+        "客单价",
+        "客单价 = 销售额 / 订单数；分母是订单数。",
+        [0.0, 1.0, 0.0, 0.0],
+    ),
+    knowledge_row(
+        "c3",
+        "架构说明",
+        "请求链路",
+        "请求先过认证，再过配额，最后进入 Agent Loop。",
+        [0.0, 0.0, 1.0, 0.0],
+    ),
+]
+
+
+def write_knowledge_artifacts(
+    base: Path,
+    rows: list[dict[str, object]],
+    *,
+    dim: int = KNOWLEDGE_DIM,
+    manifest: dict[str, object] | None = None,
+) -> Path:
+    """把索引与 manifest 写进 ``base``，返回索引路径。"""
+    base.mkdir(parents=True, exist_ok=True)
+    index = base / "knowledge_index.jsonl"
+    index.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "built_at": "2026-01-01 00:00",
+        "space": f"api/test/dim={dim}",
+        "provider": "api",
+        "model": "test-embedding",
+        "dim": dim,
+        "chunks": len(rows),
+        "ngram": 2,
+        "corpus": [],
+    }
+    payload.update(manifest or {})
+    (base / "manifest.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    return index
+
+
+class FakeQueryEmbedder:
+    """假查询向量化：永远返回同一个向量，并记录被调用次数。
+
+    用来在**离线**条件下把混合检索跑起来（真实端点由 httpx 挡在测试之外）。
+    """
+
+    def __init__(self, vector: list[float]) -> None:
+        self.vector = list(vector)
+        self.calls = 0
+        self.seen: list[str] = []
+
+    def embed(self, text: str) -> list[float]:
+        self.calls += 1
+        self.seen.append(text)
+        return list(self.vector)
+
+
+class KnowledgeLLM(MockLLMClient):
+    """第一轮调 ``knowledge_search``，第二轮给结论；记录模型实际看到的工具输出。
+
+    用于验证 DA-018 第 11 条：步骤结果**对外已打码**，而喂给模型的仍是原文。
+    """
+
+    def __init__(self, query: str) -> None:
+        super().__init__()
+        self.query = query
+        self.calls = 0
+        self.tool_contents: list[str] = []
+
+    async def chat(self, messages, tools=None) -> LLMResponse:
+        self.calls += 1
+        self.tool_contents.extend(
+            str(m.get("content") or "") for m in messages if m.get("role") == "tool"
+        )
+        if self.calls == 1:
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="kb-1",
+                        name="knowledge_search",
+                        arguments={"query": self.query},
+                    )
+                ]
+            )
+        return LLMResponse(content="已根据项目文档给出结论。")

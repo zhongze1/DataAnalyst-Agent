@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import logging
 
-import pytest
 
 from app.agent.loop import response_to_assistant_message
 from app.llm.base import LLMResponse, ToolCall
-from stubs import AlwaysToolLLM, BrokenLLM, WrongSheetLLM
+from stubs import AlwaysToolLLM, BrokenLLM, WrapUpFailingLLM, WrongSheetLLM
 
 
 async def test_run_without_session_short_circuits(make_agent) -> None:
@@ -55,6 +54,42 @@ async def test_step_limit_triggers_wrap_up(make_agent, session) -> None:
     assert "最大" in result.answer
     # 收尾后历史仍可用（未被丢弃）
     assert session.messages
+
+
+async def test_wrap_up_answer_is_persisted_in_history(make_agent, session) -> None:
+    """触顶后的收尾结论必须落进会话历史。
+
+    曾经的 bug：收尾只写 working[1:]，而 working 里**没有** final 这条
+    assistant 消息 —— 用户刚看到的阶段性结论，刷新页面/导出报告/下一轮追问
+    时就全都不见了，且历史以 role=tool 结尾（部分厂商下一轮直接 400）。
+    """
+    agent = make_agent(AlwaysToolLLM(), max_agent_steps=3)
+    result = await agent.run(session, "分析")
+
+    assert result.stop_reason == "max_steps"
+    # 1) 历史最后一条必须是 assistant，且内容就是用户看到的那个结论
+    assert [m["role"] for m in session.messages][-1] == "assistant"
+    assert session.messages[-1]["content"] == result.answer
+    # 2) 不能让历史以 tool 结尾（tool_call 没有对应的 assistant 回应 → 下一轮 400）
+    assert session.messages[-1]["role"] != "tool"
+
+
+async def test_wrap_up_failure_does_not_leak_vendor_details(
+    make_agent, session, caplog
+) -> None:
+    """收尾调用失败时，厂商端点等内部信息只能进日志，不能进用户答案。"""
+    caplog.set_level(logging.ERROR)
+    agent = make_agent(AlwaysToolLLM(), max_agent_steps=2)
+    # 走到收尾那一步才让它失败
+    agent._llm = WrapUpFailingLLM()  # noqa: SLF001 - 测试内部注入
+
+    result = await agent.run(session, "分析")
+
+    assert result.stop_reason == "max_steps"
+    assert "secret-endpoint" not in result.answer
+    assert "http" not in result.answer.lower()
+    # 但必须留痕，否则无法排查
+    assert "secret-endpoint" in caplog.text
 
 
 async def test_llm_error_is_reported_as_stop_reason(make_agent, session, caplog) -> None:

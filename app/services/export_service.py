@@ -19,11 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 
 from app.logging_setup import describe_arguments
 from app.security.redact import redact_text, redact_value
-from app.storage.artifacts import ArtifactRef, list_artifacts, load_artifact
+from app.storage.artifacts import ArtifactRef, load_artifact
 
 # Excel sheet 名限制：<=31 字符，且不能含 : \ / ? * [ ]
 _ILLEGAL_SHEET_CHARS = ':\\/?*[]'

@@ -220,6 +220,16 @@ class SessionStore:
         session.updated_at = utc_now()
         self._repo.upsert_session(_to_record(session))
 
+    def messages_for_export(self, session: Session) -> list[dict[str, Any]]:
+        """取**带工具轨迹**的消息序列，供导出报告使用。
+
+        必须从数据库读而不是用 ``session.messages``：轨迹快照（``steps``）只存在
+        数据库的 ``steps_json`` 列里，内存副本为了不污染模型请求是不带的。
+        早前导出直接读内存副本，于是「执行轨迹」永远是空的 —— 报告号称有轨迹，
+        实际只有结论和数据明细，而且没有任何报错，属于静默缺功能。
+        """
+        return _records_to_export_messages(self._repo.get_messages(session.session_id))
+
     def claim_orphan_sessions(self, owner_id: str) -> int:
         """把无主会话归给指定用户，并**同步刷新内存缓存**。
 
@@ -330,3 +340,25 @@ def _to_records(session: Session, steps: list[dict[str, Any]] | None) -> list[Me
 def _restore_messages(records: list[MessageRecord]) -> list[dict[str, Any]]:
     """数据库记录 → Agent Loop 需要的消息列表（无损）。"""
     return [dict(record.payload) for record in records if record.payload]
+
+
+def _records_to_export_messages(records: list[MessageRecord]) -> list[dict[str, Any]]:
+    """数据库记录 → 导出用消息列表（**带 steps**）。
+
+    与 :func:`_restore_messages` 的唯一区别：把 ``steps_json`` 里的轨迹快照
+    合回 ``payload``。
+
+    为什么单独做一个函数而不是直接改 ``_restore_messages``：``steps`` 不是
+    OpenAI 消息格式的字段，混进 ``session.messages`` 就会被原样发给模型，
+    严格的厂商会直接报 400。所以「喂给模型的」和「给人看的」分成两条路径，
+    只在导出这条路径上补 steps。
+    """
+    messages: list[dict[str, Any]] = []
+    for record in records:
+        if not record.payload:
+            continue
+        message = dict(record.payload)
+        if record.steps:
+            message["steps"] = record.steps
+        messages.append(message)
+    return messages
