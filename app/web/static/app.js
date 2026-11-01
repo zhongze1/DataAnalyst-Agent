@@ -86,7 +86,10 @@ function escapeHtml(text) {
 
 /* 错误气泡：带上 request_id，用户报障时直接报这个串就能定位到日志 */
 function errorHtml(err) {
-  const rid = err.requestId ? `<div class="rid">请求 ID: ${err.requestId}</div>` : "";
+  // requestId 来自响应头 X-Request-ID，而该头允许客户端自带 → 同样不可信，必须转义
+  const rid = err.requestId
+    ? `<div class="rid">请求 ID: ${escapeHtml(err.requestId)}</div>`
+    : "";
   return `<p class="err">⚠ ${escapeHtml(err.message)}</p>${rid}`;
 }
 
@@ -165,10 +168,6 @@ function addMessage(role, html, raw = "") {
   return bubble;
 }
 
-function addError(text) {
-  return addMessage("assistant", `<p class="err">⚠ ${text}</p>`);
-}
-
 /* 代码类参数：单独渲染成代码块，不与工具名挤在同一行 */
 const CODE_ARGS = new Set(["code"]);
 /* 短于此行数则默认展开 —— 常见的一行表达式不该再点一次 */
@@ -237,9 +236,14 @@ async function uploadFile(file) {
     localStorage.setItem("dataanalyst.sessionId", state.sessionId);
 
     dom.fileInfo.className = "file-info";
-    dom.fileInfo.innerHTML = `<strong>${info.file.filename}</strong>`
+    dom.fileInfo.innerHTML =
+      `<strong>${escapeHtml(info.file.filename)}</strong>`
       + `<span class="file-meta">${info.file.sheets.length} 个工作表 · ${fmtSize(info.file.size_bytes)}</span>`;
-    dom.sheetList.innerHTML = info.file.sheets.map((s) => `<span class="chip">${s}</span>`).join("");
+    // 工作表名来自用户上传的 Excel，属于不可信输入：必须转义后再进 innerHTML，
+    // 否则一个把 sheet 名写成 <img src=x onerror=...> 的文件就能在别人浏览器里执行脚本
+    dom.sheetList.innerHTML = info.file.sheets
+      .map((s) => `<span class="chip">${escapeHtml(s)}</span>`)
+      .join("");
     dom.resetBtn.disabled = false;
     setBusy(false);
     loadHistory();

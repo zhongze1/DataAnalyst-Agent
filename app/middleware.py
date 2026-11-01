@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from typing import Any, MutableMapping
@@ -14,12 +15,23 @@ from typing import Any, MutableMapping
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.context import request_id_var, reset_request_context, session_id_var, set_session_id
+from app.context import request_id_var, reset_request_context, set_session_id
 
 logger = logging.getLogger(__name__)
 
 REQUEST_ID_HEADER = "X-Request-ID"
 _HEADER_BYTES = REQUEST_ID_HEADER.lower().encode()
+# 客户端自带的 request_id 只允许这些字符：它会被写进响应头（HTTP 头必须是
+# ASCII，中文会直接抛 UnicodeEncodeError → 500）、进日志、还会回显到前端。
+# 与其信任上游，不如白名单校验，不合法就自己生成一个。
+_REQUEST_ID_SAFE = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
+
+
+def _sanitize_request_id(raw: str | None) -> str:
+    """校验客户端传来的 request_id；不合法（含非 ASCII / 超长 / 怪字符）则重新生成。"""
+    if raw and _REQUEST_ID_SAFE.match(raw):
+        return raw
+    return uuid.uuid4().hex[:12]
 
 
 class RequestContextMiddleware:
@@ -37,7 +49,7 @@ class RequestContextMiddleware:
             await self.app(scope, receive, send)
             return
 
-        request_id = Headers(scope=scope).get(REQUEST_ID_HEADER) or uuid.uuid4().hex[:12]
+        request_id = _sanitize_request_id(Headers(scope=scope).get(REQUEST_ID_HEADER))
         # 写进 scope：异常处理器运行时 ContextVar 已被重置，只能从 scope 取
         scope["request_id"] = request_id
         request_token = request_id_var.set(request_id)

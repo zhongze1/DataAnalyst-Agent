@@ -201,6 +201,43 @@ def test_client_provided_request_id_is_echoed(probe_app: FastAPI) -> None:
     assert response.headers[REQUEST_ID_HEADER] == "trace-from-gateway"
 
 
+def test_non_ascii_request_id_is_replaced_instead_of_crashing() -> None:
+    """非 ASCII 的 request_id 必须被丢弃重生成，而不是让请求 500。
+
+    HTTP 头只能是 ASCII：早前直接原样透传并 ``.encode("ascii")``，一个中文
+    ``X-Request-ID`` 就能让整个请求在中间件里抛 UnicodeEncodeError —— 而且
+    这个值是外部可控的，等于给了一个廉价的拒绝服务入口。
+
+    这里直接测净化函数：httpx 客户端自身就不让发非 ASCII 头，
+    但真实 ASGI 服务器按 latin-1 解码头字节，值照样能带着怪字符进来。
+    """
+    from app.middleware import _sanitize_request_id
+
+    for bad in ["请求-123", "tr\u00e4ce", "a" * 200, "has space", 'q"x', "semi;colon", ""]:
+        generated = _sanitize_request_id(bad)
+        assert generated != bad or bad == "", bad
+        assert len(generated) == 12, bad
+        # 必须能安全地进响应头
+        generated.encode("ascii")
+
+
+def test_safe_request_id_is_preserved() -> None:
+    """合法 ID（网关常见形态）必须原样保留，否则跨服务串联就断了。"""
+    from app.middleware import _sanitize_request_id
+
+    for good in ["trace-from-gateway", "abc123", "a.b_c:d/e-f", "A" * 128]:
+        assert _sanitize_request_id(good) == good
+
+
+def test_gateway_request_id_is_echoed_end_to_end(probe_app: FastAPI) -> None:
+    """合法 ID 端到端透传（响应头与响应体一致）。"""
+    with TestClient(probe_app) as client:
+        response = client.get("/probe", headers={REQUEST_ID_HEADER: "gw-001"})
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "gw-001"
+    assert response.headers[REQUEST_ID_HEADER] == "gw-001"
+
+
 def test_session_id_does_not_leak_between_requests(probe_app: FastAPI) -> None:
     """关键隔离性：第二个请求不能看到第一个请求绑定的 session_id。"""
     with TestClient(probe_app) as client:
