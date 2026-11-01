@@ -5,6 +5,10 @@
 index/
 *.tmp
 
+# 分块产物：由 `python -m rag_lab.chunker` 从 corpus/ 重新生成，
+# 入库只会带来 diff 噪声（语料一改它就整份变），故不入库。
+chunks.jsonl
+
 # 本地配置（含 API Key，绝不入库）
 .env
 

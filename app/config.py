@@ -103,6 +103,35 @@ class Settings(BaseSettings):
     # 刻意不做"覆盖"：配错一次就把兜底规则全丢了，而且没人会发现。
     redact_columns: str = ""
 
+    # ---- 知识库检索（DA-018）----
+    # 把 rag_lab 导出的工件注册成 Agent 工具 knowledge_search。
+    # 工件在 data/knowledge/ 下（data/* 被 gitignore → 新克隆需先跑一次导出）。
+    knowledge_enabled: bool = True
+    knowledge_index_path: Path = DATA_DIR / "knowledge" / "knowledge_index.jsonl"
+    # 留空 = 取 index 同目录的 manifest.json
+    knowledge_manifest_path: Path | None = None
+    knowledge_top_k: int = 5
+    # 模型能请求的条数上限（写进工具 schema 的 maximum）
+    knowledge_top_k_max: int = 10
+    # 工具输出的整体预算；单条片段正文另有更小的上限。
+    # 2400 是实测出来的：1200 时一段口径常被切掉，模型会反复改写查询去"凑齐"，
+    # 一次提问能跑到 12 步；放宽到 2400 后通常 1~2 次调用即可收口，总消耗反而更低。
+    knowledge_max_chars: int = 2400
+    knowledge_snippet_chars: int = 300
+    # 两路各自的最低分：低于它的片段不进榜，避免拿噪声编答案
+    knowledge_min_vector_score: float = 0.35
+    knowledge_min_keyword_score: float = 1.0
+
+    # ---- 查询向量化（DA-018，可选）----
+    # 三件套留空 = 纯关键词模式；配齐 = 「向量 + 关键词」混合检索。
+    # 与 rag_lab 的 RAG_LAB_EMBEDDING_* 是两套独立配置（两个子工程互不依赖）。
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = ""
+    embedding_timeout: float = 15.0
+    # httpx 的 trust_env：默认读系统代理；某个域名被代理搞坏时用它逃生
+    embedding_trust_env: bool = True
+
     # ---- 审计 ----
     # 工具调用审计（JSONL），与日志分开：日志给运维看，审计给合规看
     audit_dir: Path = DATA_DIR / "audit"
@@ -282,6 +311,96 @@ def validate_settings(settings: Settings) -> list[ConfigProblem]:
                         f"大于每日上限({settings.quota_user_per_day})"
                     ),
                     hint="这会让每日额度在一分钟内就被耗尽，通常是两个值写反了",
+                )
+            )
+
+    # ---- 知识库检索（DA-018）----
+    # 全部有默认值：老 .env 不新增任何必填项，升级后不会因校验失败起不来。
+    # 刻意**不校验工件是否存在** —— 否则新克隆的仓库（data/ 不入库）会启动即失败。
+    if settings.knowledge_enabled:
+        for key, value, label in (
+            ("AGENT_KNOWLEDGE_TOP_K", settings.knowledge_top_k, "默认返回条数"),
+            ("AGENT_KNOWLEDGE_TOP_K_MAX", settings.knowledge_top_k_max, "返回条数上限"),
+            ("AGENT_KNOWLEDGE_MAX_CHARS", settings.knowledge_max_chars, "工具输出预算"),
+            ("AGENT_KNOWLEDGE_SNIPPET_CHARS", settings.knowledge_snippet_chars, "单条正文字数"),
+        ):
+            if value < 1:
+                problems.append(
+                    ConfigProblem(
+                        key=key,
+                        message=f"{label}必须 >= 1，当前 {value}",
+                        hint="设为 0 会让检索恒返回空，通常不是本意",
+                    )
+                )
+        if settings.knowledge_top_k > settings.knowledge_top_k_max:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_KNOWLEDGE_TOP_K",
+                    message=(
+                        f"默认返回条数({settings.knowledge_top_k})"
+                        f"大于上限({settings.knowledge_top_k_max})"
+                    ),
+                    hint="默认值不该超过上限，这两个值可能写反了",
+                )
+            )
+        if settings.knowledge_snippet_chars > settings.knowledge_max_chars:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_KNOWLEDGE_SNIPPET_CHARS",
+                    message=(
+                        f"单条正文字数({settings.knowledge_snippet_chars})"
+                        f"大于整体预算({settings.knowledge_max_chars})"
+                    ),
+                    hint="单条正文比整次输出还大，后面的命中会被整条挤掉",
+                )
+            )
+        if not 0.0 <= settings.knowledge_min_vector_score <= 1.0:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_KNOWLEDGE_MIN_VECTOR_SCORE",
+                    message=(
+                        f"余弦最低分必须落在 [0, 1]，当前 {settings.knowledge_min_vector_score}"
+                    ),
+                    hint="余弦相似度阈值，建议 0.3~0.5；设为 1.0 等于要求完全一致",
+                )
+            )
+        if settings.knowledge_min_keyword_score < 0:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_KNOWLEDGE_MIN_KEYWORD_SCORE",
+                    message=(
+                        f"关键词最低分不能为负，当前 {settings.knowledge_min_keyword_score}"
+                    ),
+                    hint="BM25 分数非负，建议 0.5~2",
+                )
+            )
+
+        # 向量服务三件套：要么都填（混合检索），要么都留空（关键词模式）。
+        # 只填一部分是最常见的配置事故 —— 服务会静默降级，必须当场挡住。
+        parts = {
+            "AGENT_EMBEDDING_BASE_URL": settings.embedding_base_url.strip(),
+            "AGENT_EMBEDDING_API_KEY": settings.embedding_api_key.strip(),
+            "AGENT_EMBEDDING_MODEL": settings.embedding_model.strip(),
+        }
+        missing = [key for key, value in parts.items() if not value]
+        if len(missing) in (1, 2):
+            for key in missing:
+                problems.append(
+                    ConfigProblem(
+                        key=key,
+                        message="向量服务配置只填了一部分（base_url / api_key / model 需同时具备）",
+                        hint=(
+                            "三项齐全走「向量 + 关键词」混合检索；"
+                            "全留空则走纯关键词模式，无需任何向量服务"
+                        ),
+                    )
+                )
+        if not missing and settings.embedding_timeout <= 0:
+            problems.append(
+                ConfigProblem(
+                    key="AGENT_EMBEDDING_TIMEOUT",
+                    message=f"向量服务超时必须为正数，当前 {settings.embedding_timeout}",
+                    hint="例如 15（秒）；过小会让检索频繁降级",
                 )
             )
 

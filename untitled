@@ -1,3 +1,0 @@
-uv sync
-copy .env.example .env        # Windows；填入 AGENT_LLM_API_KEY
-uv run uvicorn main:app --reload

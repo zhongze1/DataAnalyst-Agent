@@ -56,6 +56,24 @@ _OUTPUT_RULES = """## 输出格式
   界面的「执行过程」面板里有准确的一份。
 """
 
+# DA-018 知识库检索。只在工具确实注册了（出现在 available_tools 里）时才插入本段 ——
+# 判断依据刻意只用 available_tools：本函数**拿不到也不该拿到配置**，
+# 这条结构性约束由 tests/test_sandbox_security.py 守着。
+_KNOWLEDGE_TOOL_NAME = "knowledge_search"
+
+_KNOWLEDGE = """## 项目文档检索（knowledge_search）
+- 问题涉及**本项目自身的文档 / 口径 / 规则 / 架构 / 指标定义 / 已知限制**时
+  （如「销售额口径怎么定义」「敏感字段怎么打码」「配额规则」「为什么这么设计」），
+  **优先调用 knowledge_search**：它是项目文档的唯一权威来源。
+- **不要用 run_pandas 去猜口径**，也不要让用户复述文档内容。
+- 顺序：先 knowledge_search 拿到出处（文档 + 章节 + 行号），需要算数时再走数据侧工具。
+- 返回「知识库中没有相关内容」时，如实说明「文档里没查到」，**严禁编造口径**。
+- 一次调用已返回多条命中（含各自的文档、章节与行号）；命中正文可能被截断，
+  需要补全时**针对具体小节**再查一次即可，不要用同义改写对同一问题反复检索。
+- 它只查项目文档，不查用户上传的 Excel 数据。
+- 引用时给出来源（文档名 + 章节 + 行号），不要粘贴大段原文。
+"""
+
 
 def build_system_prompt(
     session: Session | None,
@@ -77,12 +95,9 @@ def build_system_prompt(
             "沙箱禁止任何文件读取，你也不需要知道文件在磁盘上的位置。"
         )
 
-    return "\n\n".join(
-        [
-            _WORKFLOW,
-            context,
-            f"## 可用工具\n{', '.join(available_tools)}",
-            _UNANSWERABLE,
-            _OUTPUT_RULES,
-        ]
-    )
+    parts = [_WORKFLOW, context]
+    if _KNOWLEDGE_TOOL_NAME in available_tools:
+        parts.append(_KNOWLEDGE)
+    parts.append(f"## 可用工具\n{', '.join(available_tools)}")
+    parts.extend([_UNANSWERABLE, _OUTPUT_RULES])
+    return "\n\n".join(parts)

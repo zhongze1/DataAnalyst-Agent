@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 
-import pytest
 
 from app.agent.events import (
     EVENT_DONE,

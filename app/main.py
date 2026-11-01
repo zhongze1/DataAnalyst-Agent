@@ -10,6 +10,25 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from app import __version__
+from app.config import (
+    INDEX_FILE,
+    STATIC_DIR,
+    format_problems,
+    get_settings,
+    runtime_summary,
+    validate_settings,
+)
+from app.dependencies import describe_settings, get_store
+from app.errors import AppError, ConfigError
+from app.logging_setup import setup_logging
+from app.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
+from app.routers import auth, chat, chat_stream, export, files, sessions
+from app.storage.migrate import migrate_meta_files
+
+logger = logging.getLogger(__name__)
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -27,25 +46,6 @@ class NoCacheStaticFiles(StaticFiles):
         response = super().file_response(*args, **kwargs)
         response.headers["Cache-Control"] = "no-cache"
         return response
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
-from app import __version__
-from app.config import (
-    INDEX_FILE,
-    STATIC_DIR,
-    format_problems,
-    get_settings,
-    runtime_summary,
-    validate_settings,
-)
-from app.dependencies import describe_settings, get_store
-from app.errors import AppError, ConfigError
-from app.logging_setup import setup_logging
-from app.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
-from app.storage.migrate import migrate_meta_files
-from app.routers import auth, chat, chat_stream, export, files, sessions
-
-logger = logging.getLogger(__name__)
 
 
 # ============================================================ 统一错误响应

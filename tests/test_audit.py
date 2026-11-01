@@ -16,7 +16,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from app.audit import AuditLogger, get_audit_logger, record_tool_call
+from app.audit import AuditLogger, get_audit_logger
 from app.context import request_id_var, session_id_var
 
 

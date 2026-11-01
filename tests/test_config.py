@@ -261,3 +261,87 @@ def test_properly_configured_auth_passes(tmp_path: Path) -> None:
         )
         == []
     )
+
+
+# ---------------------------------------------------------------- 知识库（DA-018）
+def test_old_env_without_knowledge_keys_is_still_valid(tmp_path: Path) -> None:
+    """升级不新增必填项：一份老 .env（没有任何 AGENT_KNOWLEDGE_*）必须照常通过。"""
+    assert validate_settings(_settings(tmp_path)) == []
+
+
+def test_knowledge_top_k_zero_is_rejected(tmp_path: Path) -> None:
+    problems = validate_settings(_settings(tmp_path, knowledge_top_k=0))
+    problem = next(p for p in problems if p.key == "AGENT_KNOWLEDGE_TOP_K")
+    assert "必须 >= 1" in problem.message
+    assert problem.hint, "必须给出修复建议"
+
+
+def test_knowledge_top_k_above_ceiling_is_rejected(tmp_path: Path) -> None:
+    problems = validate_settings(
+        _settings(tmp_path, knowledge_top_k=9, knowledge_top_k_max=5)
+    )
+    assert any(
+        p.key == "AGENT_KNOWLEDGE_TOP_K" and "大于上限" in p.message for p in problems
+    )
+
+
+def test_knowledge_snippet_larger_than_budget_is_rejected(tmp_path: Path) -> None:
+    problems = validate_settings(
+        _settings(tmp_path, knowledge_max_chars=100, knowledge_snippet_chars=200)
+    )
+    assert any(p.key == "AGENT_KNOWLEDGE_SNIPPET_CHARS" for p in problems)
+
+
+def test_min_vector_score_out_of_range_is_rejected(tmp_path: Path) -> None:
+    problems = validate_settings(_settings(tmp_path, knowledge_min_vector_score=1.5))
+    assert any(p.key == "AGENT_KNOWLEDGE_MIN_VECTOR_SCORE" for p in problems)
+
+
+def test_negative_keyword_score_is_rejected(tmp_path: Path) -> None:
+    problems = validate_settings(_settings(tmp_path, knowledge_min_keyword_score=-1.0))
+    assert any(p.key == "AGENT_KNOWLEDGE_MIN_KEYWORD_SCORE" for p in problems)
+
+
+def test_partial_embedding_config_is_rejected_with_a_way_out(tmp_path: Path) -> None:
+    """只填了 base_url：必须挡住，并且告诉用户「或者全部留空」这条出路。"""
+    problems = validate_settings(
+        _settings(tmp_path, embedding_base_url="https://vector.example/v1")
+    )
+    assert {p.key for p in problems} == {
+        "AGENT_EMBEDDING_API_KEY",
+        "AGENT_EMBEDDING_MODEL",
+    }
+    assert all("关键词模式" in p.hint for p in problems)
+
+
+def test_complete_embedding_config_passes(tmp_path: Path) -> None:
+    problems = validate_settings(
+        _settings(
+            tmp_path,
+            embedding_base_url="https://vector.example/v1",
+            embedding_api_key="k",
+            embedding_model="m",
+        )
+    )
+    assert problems == []
+
+
+def test_embedding_timeout_must_be_positive(tmp_path: Path) -> None:
+    problems = validate_settings(
+        _settings(
+            tmp_path,
+            embedding_base_url="https://vector.example/v1",
+            embedding_api_key="k",
+            embedding_model="m",
+            embedding_timeout=0,
+        )
+    )
+    assert any(p.key == "AGENT_EMBEDDING_TIMEOUT" for p in problems)
+
+
+def test_knowledge_rules_are_skipped_when_switch_is_off(tmp_path: Path) -> None:
+    """总开关关掉后，这些规则就不该再挡启动（它们只服务于那个工具）。"""
+    problems = validate_settings(
+        _settings(tmp_path, knowledge_enabled=False, knowledge_top_k=0)
+    )
+    assert problems == []

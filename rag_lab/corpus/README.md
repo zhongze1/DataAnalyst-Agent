@@ -20,8 +20,8 @@
 | 能力 | 说明 | 关键实现位置 |
 | --- | --- | --- |
 | 单 Agent Loop | 一次提问 = 一整轮「模型思考 → 调工具 → 观察结果 → 继续或收尾」，循环上限可配置 | `app/agent/loop.py` |
-| 10 个分析工具 | 见下方工具清单，全部为真实 pandas 计算，非模型生成 | `app/tools/pandas_tools.py`、`app/tools/find_tools.py` |
-| 代码沙箱 | `run_pandas` 用 AST 白名单执行模型写的 pandas 代码：禁 `import`、禁 dunder、禁文件读写 | `app/tools/pandas_tools.py` |
+| 11 个分析工具 | 见下方工具清单，全部为真实 pandas 计算，非模型生成 | `app/tools/pandas_tools.py`、`app/tools/find_tools.py`、`app/tools/knowledge_tools.py` |
+| 代码沙箱 | `run_pandas` 用 AST **黑名单**执行模型写的 pandas 代码：拦截 `import`、dunder、常见文件 I/O 属性。注意它**不是安全边界**（`pd.eval` 字符串表达式等可绕过），只适用于可信提问者场景，详见根目录 `SECURITY.md` | `app/tools/pandas_tools.py` |
 | 流式输出 | SSE 逐事件推送（工具开始/完成、答案增量、收尾快照），支持"停止生成" | `app/routers/chat_stream.py`、`app/agent/events.py` |
 | 会话持久化 | 对话与元数据落 SQLite，进程重启可恢复；上传的 Excel 留在磁盘供 pandas 读取 | `app/storage/session_store.py`、`app/storage/sqlite_repo.py` |
 | 报告导出 | 一键导出 Markdown / Excel（结论 + 执行轨迹 + 数据明细 sheet） | `app/services/export_service.py`、`app/routers/export.py` |

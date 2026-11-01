@@ -13,7 +13,6 @@ import logging
 import pandas as pd
 import pytest
 
-from app.tools import registry
 from app.tools.base import (
     ToolContext,
     encode_tool_error,

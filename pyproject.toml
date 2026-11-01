@@ -2,7 +2,9 @@
 name = "dataanalyst-agent"
 version = "0.1.0"
 description = "上传 Excel，由单 Agent Loop 自主调用 pandas 完成数据分析"
-requires-python = ">=3.14"
+# 代码在 3.12 即可解析（已用 ast.parse(feature_version=(3,12)) 全量验证），
+# 且 rag_lab 子工程写的就是 >=3.12 —— 两个工程的下限保持一致。
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.142.2",
     "uvicorn[standard]>=0.54.0",

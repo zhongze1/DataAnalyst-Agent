@@ -31,7 +31,7 @@
 | `src/rag_lab/evaluate.py` | recall@k / MRR 评估，写 `eval/report.md` | ✅ RAG-04 |
 | `eval/questions.jsonl` | 20 道评估题（18 计分 + 2 陷阱）+ 标准答案标注 | ✅ RAG-04 |
 | `eval/report.md` | 评估报告（**脚本生成，勿手改**） | ✅ RAG-04 |
-| `tests/` | 112 条用例（全离线：FakeEmbedder + MockTransport） | ✅ RAG-04 |
+| `tests/` | 123 条用例（全离线：FakeEmbedder + MockTransport） | ✅ RAG-04 |
 
 ## 环境与命令（已实测）
 
@@ -39,13 +39,13 @@
 | --- | --- |
 | uv / Python | `0.12.17` / `3.14.7`（独立 `.venv`，与主工程同版本但互不影响） |
 | 依赖 | `httpx`（RAG-03 起）+ `pytest`；本包以 editable 方式安装 |
-| 测试 | `uv run pytest -q` → **68 passed** |
+| 测试 | `uv run pytest -q` → **123 passed** |
 
 ```powershell
 cd rag_lab
 uv venv --python 3.14     # 建独立虚拟环境（本机已有 3.14，零下载）
 uv sync                   # 安装依赖 + editable 安装本包
-uv run pytest -q          # => 68 passed
+uv run pytest -q          # => 123 passed
 ```
 
 > 打包方式：`[build-system] uv_build`（uv 自带，不额外下载 hatchling）。
@@ -182,7 +182,7 @@ $ uv run python -m rag_lab.embedding --dry-run
 $ uv run python -m rag_lab.embedding --provider fake
 空间: fake/fake-hash-v1/dim=auto
 片段总数: 73     缓存命中: 0     本次计算: 73（3 批）     向量维度: 256
-缓存文件: rag_lab/index/embeddings.jsonl（当前共 73 条，约 403 KB）
+缓存文件: rag_lab/index/embeddings.jsonl（当前共 167 条，约 2.5 MB）
 
 $ uv run python -m rag_lab.embedding --provider fake   # 再跑一次
 缓存命中: 73     本次计算: 0（0 批）

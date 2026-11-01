@@ -22,7 +22,12 @@ uvicorn.err.log
 coverage.xml
 htmlcov/
 .pytest_cache/
+.ruff_cache/
 
 # IDE
 .idea/
 .vscode/
+
+# AI tool local plans
+.codebuddy/
+.trae/

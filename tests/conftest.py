@@ -26,12 +26,14 @@ import app.routers.chat
 import app.routers.chat_stream
 import app.routers.files
 import app.routers.sessions
+import app.services.knowledge_service
 import app.storage.session_store
 import app.dependencies
 import app.main
 import app.security.redact
 import app.storage.session_store
 import app.tools.base
+import app.tools.knowledge_tools
 from app.agent.loop import DataAnalystAgent
 from app.config import Settings
 from app.dependencies import get_agent, get_store
@@ -69,6 +71,9 @@ def settings(tmp_path: Path) -> Settings:
         # 认证开启时 validate_settings 会要求这些字段有值，给齐以免误报
         auth_admin_username="admin",
         auth_admin_password="admin-pass-123",
+        # 知识库工件固定指向 tmp_path：全局注册表里那个 knowledge_search
+        # 在测试中绝不能去读仓库真实的 data/knowledge（既隔离又结果确定）
+        knowledge_index_path=tmp_path / "knowledge" / "knowledge_index.jsonl",
     )
 
 
@@ -119,6 +124,9 @@ def patch_settings(monkeypatch: pytest.MonkeyPatch):
             app.routers.chat,
             app.routers.chat_stream,
             app.security.redact,
+            # 知识库服务与工具都各自绑定了 get_settings（工件路径、阈值、embedding）
+            app.services.knowledge_service,
+            app.tools.knowledge_tools,
         ):
             if hasattr(module, "get_settings"):
                 monkeypatch.setattr(module, "get_settings", lambda: target, raising=False)
@@ -153,6 +161,9 @@ def isolate_settings(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Ite
         app.routers.chat_stream,
         # 打码开关与关键词集合也读 settings
         app.security.redact,
+        # 知识库服务与工具（DA-018）：漏了它们会拿到真实 settings 去读仓库工件
+        app.services.knowledge_service,
+        app.tools.knowledge_tools,
     ):
         if hasattr(module, "get_settings"):
             monkeypatch.setattr(module, "get_settings", lambda: settings, raising=False)
@@ -191,6 +202,23 @@ def clear_quota_cache() -> Iterator[None]:
         yield
     finally:
         get_quota_service.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_knowledge_cache() -> Iterator[None]:
+    """清掉 ``get_knowledge_service`` 的 lru_cache（DA-018）。
+
+    与 ``clear_quota_cache`` 同理：它会把**第一次**用到的 settings（连
+    73×1024 维的工件）一直留着。不清的话，某个用例的检索结果会来自
+    上一个用例的 tmp 工件路径，表现为「明明没建工件却检索到了东西」。
+    """
+    from app.services.knowledge_service import get_knowledge_service
+
+    get_knowledge_service.cache_clear()
+    try:
+        yield
+    finally:
+        get_knowledge_service.cache_clear()
 
 
 @pytest.fixture(autouse=True)
