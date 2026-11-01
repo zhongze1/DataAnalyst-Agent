@@ -7,15 +7,16 @@ from fastapi import APIRouter, Depends
 from app.agent.loop import DataAnalystAgent
 from app.context import set_session_id
 from app.dependencies import (
+    ensure_owner,
     get_agent,
     get_quota_service,
     get_store,
     quota_user_key,
     require_user,
 )
-from app.errors import SessionNotFoundError
 from app.schemas import ERROR_RESPONSES, ChatRequest, ChatResponse, ToolStep
 from app.services.quota_service import QuotaService
+from app.storage.repository import UserRecord
 from app.storage.session_store import SessionStore
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], responses=ERROR_RESPONSES)
@@ -29,10 +30,15 @@ async def chat(
     store: SessionStore = Depends(get_store),
     quota: QuotaService = Depends(get_quota_service),
 ) -> ChatResponse:
-    """单 Agent Loop 的入口：一次提问 = 一次完整的「思考 → 调工具 → 观察 → 回答」。"""
-    session = store.get(payload.session_id)
-    if payload.session_id and session is None:
-        raise SessionNotFoundError()
+    """单 Agent Loop 的入口：一次提问 = 一次完整的「思考 → 调工具 → 观察 → 回答」。
+
+    会话归属由 :func:`~app.dependencies.ensure_owner` 统一校验：不是自己的会话
+    一律 404。对话是**在别人数据上执行任意工具**的入口，漏掉校验等于把整个
+    数据面开放给任何知道 session_id 的人。
+    """
+    # session_id 可省略（此时 session=None，Agent 会提示「请先上传文件」）；
+    # 一旦给了就必须是自己的，否则 404。
+    session = ensure_owner(store.get(payload.session_id), user) if payload.session_id else None
 
     # 绑定会话上下文：本次请求内所有日志都会自动带上 session_id
     set_session_id(session.session_id if session else None)
@@ -76,9 +82,10 @@ async def reset_conversation(
     user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> dict[str, bool]:
-    """清空对话历史（保留已上传的数据），开始一轮新的分析。"""
-    session = store.get(session_id)
-    if session is None:
-        raise SessionNotFoundError()
+    """清空对话历史（保留已上传的数据），开始一轮新的分析。
+
+    同样必须校验归属：否则任何人都能清空别人的对话历史。
+    """
+    session = ensure_owner(store.get(session_id), user)
     store.reset_messages(session)
     return {"reset": True}

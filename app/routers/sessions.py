@@ -10,10 +10,9 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from app.config import get_settings
-from app.dependencies import get_store, owner_filter, require_user
-from app.errors import SessionNotFoundError
+from app.dependencies import ensure_owner, get_store, owner_filter, require_user
 from app.schemas import SessionDetail, SessionSummary
+from app.security.redact import redact_text, redact_value
 from app.storage.repository import UserRecord
 from app.storage.session_store import SessionStore
 
@@ -42,24 +41,12 @@ async def list_sessions(
                 updated_at=session.updated_at,
                 turn_count=session.turn_count,
                 size_bytes=session.size_bytes,
-                preview=session.last_question(),
+                # DA-015：preview 来自用户提问原文（可能含手机号等），对外必须脱敏
+                preview=redact_text(session.last_question()),
             )
         )
     logger.info("列出会话 %d 个", len(summaries))
     return summaries
-
-
-def _ensure_owner(session, user) -> None:
-    """归属校验：不是自己的会话就当「不存在」。
-
-    刻意返回 404 而不是 403 —— 403 等于告诉对方「这个 id 确实存在」，
-    本身就是信息泄露。
-    """
-    settings = get_settings()
-    if not settings.auth_enabled:
-        return
-    if session is None or session.owner_id != (user.user_id if user else None):
-        raise SessionNotFoundError()
 
 
 @router.get("/{session_id}", response_model=SessionDetail)
@@ -68,11 +55,11 @@ async def get_session_detail(
     user: UserRecord = Depends(require_user),
     store: SessionStore = Depends(get_store),
 ) -> SessionDetail:
-    """会话详情：含完整消息序列，用于刷新后恢复界面。"""
-    session = store.get(session_id)
-    _ensure_owner(session, user)
-    if session is None:
-        raise SessionNotFoundError()
+    """会话详情：含完整消息序列，用于刷新后恢复界面。
+
+    归属校验统一走 :func:`~app.dependencies.ensure_owner`（不是自己的会话按 404）。
+    """
+    session = ensure_owner(store.get(session_id), user)
     records = store.repo.get_messages(session_id)
     return SessionDetail(
         session_id=session.session_id,
@@ -82,7 +69,10 @@ async def get_session_detail(
         updated_at=session.updated_at,
         turn_count=session.turn_count,
         size_bytes=session.size_bytes,
-        messages=session.messages,
+        # DA-015：内存里的 messages 是**喂给模型的原文**（tool 输出含明文手机号等）。
+        # 导出链路已经脱敏，详情接口若原样返回，等于开了一个绕过脱敏的后门 ——
+        # 所以这里在出口统一过一遍，与界面/导出保持同一口径。
+        messages=[redact_value(m) for m in session.messages],
         last_step_count=len(records[-1].steps) if records and records[-1].steps else 0,
     )
 

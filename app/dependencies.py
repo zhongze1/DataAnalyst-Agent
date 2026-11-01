@@ -12,14 +12,14 @@ from fastapi import Depends, Request
 
 from app.agent.loop import DataAnalystAgent
 from app.config import Settings, get_settings
-from app.errors import AuthRequiredError, PermissionDeniedError
+from app.errors import AuthRequiredError, PermissionDeniedError, SessionNotFoundError
 from app.llm.base import LLMClient, LLMError
 from app.llm.mock_client import MockLLMClient
 from app.llm.openai_client import OpenAICompatClient
 from app.services.auth_service import AuthService
 from app.services.quota_service import LOCAL_USER_KEY, QuotaService
 from app.storage.repository import UserRecord
-from app.storage.session_store import SessionStore
+from app.storage.session_store import Session, SessionStore
 from app.tools import registry  # 触发 pandas_tools 的工具注册
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,38 @@ def owner_filter(user: UserRecord | None) -> str | None:
     if not settings.auth_enabled:
         return None
     return user.user_id if user else None
+
+
+def ensure_owner(session: Session | None, user: UserRecord | None) -> Session:
+    """校验会话归属，不通过一律按「不存在」抛 404。
+
+    **这是全工程唯一的归属校验实现**。此前 files / export / sessions 各写了一份
+    变体，唯独对话入口漏了校验 —— 于是任何人只要拿到别人的 session_id，就能
+    借 ``/api/chat`` 在别人的数据上跑分析、还能用 ``/api/chat/reset`` 清空对方对话。
+    重复实现正是那个漏洞的根因，所以这里收敛成一处。
+
+    返回 session 便于调用方直接链式使用（``session = ensure_owner(...)``），
+    省掉「校验过了还要再 assert 一次非 None」的重复判断。
+
+    Args:
+        session: 已从仓库取出的会话，可能为 None。
+        user: 当前登录用户；认证关闭时由 ``require_user`` 返回 None。
+
+    Raises:
+        SessionNotFoundError: 会话不存在，或不属于当前用户。
+
+    注意：归属不符时**必须**返回 404 而非 403 —— 403 等于告诉对方
+    「这个 id 确实存在」，本身就是信息泄露。
+    """
+    settings = get_settings()
+    if not settings.auth_enabled:
+        # 本机模式：不区分归属，但仍要求会话真实存在
+        if session is None:
+            raise SessionNotFoundError()
+        return session
+    if session is None or session.owner_id != (user.user_id if user else None):
+        raise SessionNotFoundError()
+    return session
 
 
 def describe_settings() -> dict[str, str]:

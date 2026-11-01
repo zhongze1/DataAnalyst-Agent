@@ -386,6 +386,65 @@ def test_uploaded_session_is_owned_by_uploader(auth_client, auth_service) -> Non
     assert auth_client.get(f"/api/sessions/{session_id}").status_code == 200
 
 
+# ============================== 对话入口的归属校验（IDOR 回归）
+# 曾经的漏洞：files / sessions / export 都校验了归属，唯独 chat / chat_stream /
+# reset 没有。于是知道 session_id 的人可以在别人的数据上跑分析、读走结果、
+# 甚至清空对方的对话历史。下面三条用例锁死这条边界。
+
+
+def test_cannot_chat_on_other_users_session(auth_client, auth_store, auth_service) -> None:
+    """用户 B 拿 A 的 session_id 提问必须 404，且不能执行任何工具。"""
+    admin = auth_service.repo.get_user_by_username("admin")
+    his = auth_store.create("管理员数据.xlsx", _xlsx_bytes(), owner_id=admin.user_id)
+
+    auth_service.create_user("bob", "bob-pass-1234")
+    _login(auth_client, "bob", "bob-pass-1234")
+
+    response = auth_client.post(
+        "/api/chat", json={"session_id": his.session_id, "message": "这表有多少行"}
+    )
+    assert response.status_code == 404
+    # 关键：不能只靠状态码，必须确认没有真的跑出结论（否则数据已经泄露了）
+    assert "steps" not in response.json()
+    assert response.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+
+def test_cannot_stream_chat_on_other_users_session(
+    auth_client, auth_store, auth_service
+) -> None:
+    """SSE 入口同样必须 404 —— 状态码在推流前就能定，所以不该推一半。"""
+    admin = auth_service.repo.get_user_by_username("admin")
+    his = auth_store.create("管理员数据.xlsx", _xlsx_bytes(), owner_id=admin.user_id)
+
+    auth_service.create_user("bob", "bob-pass-1234")
+    _login(auth_client, "bob", "bob-pass-1234")
+
+    response = auth_client.post(
+        "/api/chat/stream", json={"session_id": his.session_id, "message": "这表有多少行"}
+    )
+    assert response.status_code == 404
+    assert "text/event-stream" not in response.headers.get("content-type", "")
+
+
+def test_cannot_reset_other_users_conversation(
+    auth_client, auth_store, auth_service
+) -> None:
+    """清空别人的对话历史是破坏性操作，必须 404 而不是静默成功。"""
+    admin = auth_service.repo.get_user_by_username("admin")
+    his = auth_store.create("管理员数据.xlsx", _xlsx_bytes(), owner_id=admin.user_id)
+    # 先给这个会话塞一段真实对话，这样「被清空」才看得出来
+    his.messages = [{"role": "user", "content": "管理员的问题"}]
+    auth_store.save_turn(his, [])
+
+    auth_service.create_user("bob", "bob-pass-1234")
+    _login(auth_client, "bob", "bob-pass-1234")
+
+    response = auth_client.post(f"/api/chat/reset?session_id={his.session_id}")
+    assert response.status_code == 404
+    # 原始对话必须还在
+    assert len(auth_store.get(his.session_id).messages) == 1
+
+
 # ================================================== 管理员权限
 def test_only_admin_can_list_and_create_users(auth_client, auth_service) -> None:
     _login(auth_client, "admin", "admin-pass-123")

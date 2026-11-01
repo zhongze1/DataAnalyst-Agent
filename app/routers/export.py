@@ -16,9 +16,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 
-from app.config import get_settings
-from app.dependencies import get_store, require_user
-from app.errors import BadRequestError, SessionNotFoundError
+from app.dependencies import ensure_owner, get_store, require_user
+from app.errors import BadRequestError
 from app.services.export_service import (
     build_markdown,
     build_xlsx,
@@ -35,15 +34,6 @@ router = APIRouter(prefix="/api/sessions", tags=["export"])
 EXPORT_FORMATS = {"md", "xlsx"}
 
 
-def _owns(session, user) -> bool:
-    settings = get_settings()
-    if not settings.auth_enabled:
-        return session is not None
-    if session is None:
-        return False
-    return session.owner_id == (user.user_id if user else None)
-
-
 @router.get("/{session_id}/export")
 async def export_session(
     session_id: str,
@@ -57,11 +47,10 @@ async def export_session(
     if fmt not in EXPORT_FORMATS:
         raise BadRequestError(f"不支持的导出格式：{format}。可用：{', '.join(sorted(EXPORT_FORMATS))}")
 
-    session = store.get(session_id)
-    if not _owns(session, user):
-        raise SessionNotFoundError()
+    session = ensure_owner(store.get(session_id), user)
 
-    messages = list(session.messages)
+    # 必须用带 steps 的版本：轨迹快照只在数据库里，内存副本不带（见 messages_for_export）
+    messages = store.messages_for_export(session)
     turns = collect_turns(messages)
     artifacts = list_artifacts(session.path)
     generated_at = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")

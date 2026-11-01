@@ -1,4 +1,4 @@
-﻿"""W2-2 分析报告导出测试。
+"""W2-2 分析报告导出测试。
 
 **所有涉及文件系统的用例都走 tmp_path**（由 settings.upload_dir /
 db_path 夹具隔离），绝不碰仓库的 data/ 目录 —— 这条纪律已经被违反过两次
@@ -433,6 +433,37 @@ def test_export_rejects_unknown_format(client, session) -> None:
 
 def test_export_unknown_session_is_404(client) -> None:
     assert client.get("/api/sessions/nope/export").status_code == 404
+
+
+def test_export_report_actually_contains_tool_trace(client, session) -> None:
+    """导出报告必须真的带「执行轨迹」。
+
+    曾经的 bug：``collect_turns`` 读 ``message["steps"]``，但 steps 只写进数据库的
+    ``steps_json`` 列，内存里的 payload 从来没有这个键 —— 于是「执行轨迹」sheet
+    永远只有表头、Markdown 里永远没有「执行过程」，而且**不报任何错**。
+    报告对外宣称有轨迹，实际是静默缺功能。
+    """
+    # 走真实链路：先提一个问题，让 Agent 真的调几次工具并落库
+    chat = client.post(
+        "/api/chat", json={"session_id": session.session_id, "message": "整体情况如何？"}
+    )
+    assert chat.status_code == 200
+    assert chat.json()["steps"], "这一轮应该真的调用了工具"
+
+    # Markdown：必须出现「执行过程」折叠块与工具名
+    md = client.get(f"/api/sessions/{session.session_id}/export?format=md")
+    assert md.status_code == 200
+    text = md.content.decode("utf-8")
+    assert "执行过程" in text
+    assert "run_pandas" in text or "list_sheets" in text
+
+    # Excel：执行轨迹 sheet 必须不止表头一行
+    from openpyxl import load_workbook
+
+    xlsx = client.get(f"/api/sessions/{session.session_id}/export?format=xlsx")
+    book = load_workbook(io.BytesIO(xlsx.content))
+    assert "执行轨迹" in book.sheetnames
+    assert book["执行轨迹"].max_row > 1, "执行轨迹不能只有表头"
 
 
 def test_export_requires_login_when_auth_enabled(auth_client) -> None:

@@ -19,8 +19,14 @@ from fastapi.responses import StreamingResponse
 from app.agent.events import error_event, done_event
 from app.agent.loop import DataAnalystAgent
 from app.context import set_session_id
-from app.dependencies import get_agent, get_quota_service, get_store, quota_user_key, require_user
-from app.errors import SessionNotFoundError
+from app.dependencies import (
+    ensure_owner,
+    get_agent,
+    get_quota_service,
+    get_store,
+    quota_user_key,
+    require_user,
+)
 from app.schemas import ChatRequest
 from app.services.quota_service import QuotaService
 from app.storage.repository import UserRecord
@@ -49,9 +55,7 @@ async def chat_stream(
     转成标准 JSON 错误响应（前端已有对应分支，见 ``app.js`` 的
     ``!response.ok`` 路径），而不是推一半再中断。
     """
-    session = store.get(payload.session_id)
-    if payload.session_id and session is None:
-        raise SessionNotFoundError()
+    session = ensure_owner(store.get(payload.session_id), user) if payload.session_id else None
     set_session_id(session.session_id if session else None)
 
     reservation = quota.reserve(
